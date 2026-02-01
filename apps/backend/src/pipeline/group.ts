@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import type { ClassificationResult } from '@nixo-slackbot/shared';
+import type { ClassificationResult, Ticket } from '@nixo-slackbot/shared';
 import {
   findTicketByRootThreadTs,
   findTicketByCanonicalKey,
@@ -8,8 +8,10 @@ import {
   createTicket,
   updateTicket,
   getTicket,
+  findSimilarTicketsCandidates,
+  type TicketCandidate,
 } from '../db/tickets';
-import { upsertMessage, findSimilarMessage, getMessagesByTicketId } from '../db/messages';
+import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates } from '../db/messages';
 import { normalizeMessage } from './normalize';
 import { openaiLimiter } from './limiter';
 import { generateTicketSummary, generateTicketSummaryFromConversation } from './summarize';
@@ -19,6 +21,13 @@ const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.1
 // More lenient threshold for recent channel fallback (Step 3.5)
 // Since we already have temporal (5 min) and channel constraints, we can be more relaxed
 const RECENT_CHANNEL_THRESHOLD = parseFloat(process.env.RECENT_CHANNEL_THRESHOLD || '0.40');
+
+// New scoring-based thresholds
+const SCORE_THRESHOLD = parseFloat(process.env.SCORE_THRESHOLD || '0.75');
+const RECENT_CHANNEL_SCORE_THRESHOLD = parseFloat(process.env.RECENT_CHANNEL_SCORE_THRESHOLD || '0.65');
+const RECENT_WINDOW_MINUTES = parseInt(process.env.RECENT_WINDOW_MINUTES || '5', 10);
+const SIMILARITY_GRAYZONE_LOW = parseFloat(process.env.SIMILARITY_GRAYZONE_LOW || '0.17');
+const SIMILARITY_GRAYZONE_HIGH = parseFloat(process.env.SIMILARITY_GRAYZONE_HIGH || '0.30');
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -47,6 +56,272 @@ function cosineDistance(a: number[], b: number[]): number {
   const cosineSimilarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   // Cosine distance = 1 - cosine similarity
   return 1 - cosineSimilarity;
+}
+
+export interface MatchScoreBreakdown {
+  semanticSim: number;
+  sameCategory: boolean;
+  sameChannel: boolean;
+  recentUpdate: boolean;
+  signalOverlap: number;
+  totalScore: number;
+}
+
+export interface MatchScoreResult {
+  score: number;
+  breakdown: MatchScoreBreakdown;
+}
+
+/**
+ * Compute a match score combining semantic similarity with structural signals.
+ * Returns a score between 0 and 1, with breakdown for logging.
+ */
+function computeMatchScore(params: {
+  distance: number;
+  sameChannel: boolean;
+  minutesSinceTicketUpdate: number;
+  sameCategory: boolean;
+  overlapCount: number;
+}): MatchScoreResult {
+  const { distance, sameChannel, minutesSinceTicketUpdate, sameCategory, overlapCount } = params;
+
+  // Semantic similarity: convert distance [0..2] to similarity [0..1]
+  // Clamp to ensure we don't go negative or above 1
+  const semanticSim = Math.max(0, Math.min(1, 1 - (distance / 2))) * 0.60;
+
+  let score = semanticSim;
+
+  // Structural signals
+  if (sameCategory) {
+    score += 0.10;
+  }
+  if (sameChannel) {
+    score += 0.15;
+  }
+  if (minutesSinceTicketUpdate <= 10) {
+    score += 0.15;
+  }
+  if (overlapCount >= 1) {
+    score += 0.10;
+  }
+
+  // Cap score at 1.0
+  score = Math.min(1.0, score);
+
+  return {
+    score,
+    breakdown: {
+      semanticSim,
+      sameCategory,
+      sameChannel,
+      recentUpdate: minutesSinceTicketUpdate <= 10,
+      signalOverlap: overlapCount,
+      totalScore: score,
+    },
+  };
+}
+
+/**
+ * Normalize a signal to bare keyword(s) for comparison.
+ * Ticket signals use prefixes (feature_export, platform_api); classifier signals are often raw (export, CSV).
+ * We strip known prefixes and also split on underscore so "feature_export" matches "export".
+ */
+function signalToKeywords(signal: string): string[] {
+  const lower = signal.toLowerCase();
+  const withoutPrefix = lower.replace(/^(feature_|platform_|error_)/, '');
+  return [...new Set([withoutPrefix, lower].filter(Boolean))];
+}
+
+/**
+ * Compute signal overlap between message signals and ticket signals.
+ * Uses both exact match and keyword overlap so "feature_export" (ticket) matches "export" (classifier).
+ */
+function computeSignalOverlap(messageSignals: string[], ticketSignals: string[]): number {
+  const messageKeywords = new Set<string>();
+  for (const s of messageSignals) {
+    for (const k of signalToKeywords(s)) {
+      messageKeywords.add(k);
+    }
+  }
+  const ticketKeywords = new Set<string>();
+  for (const s of ticketSignals) {
+    for (const k of signalToKeywords(s)) {
+      ticketKeywords.add(k);
+    }
+  }
+
+  let overlap = 0;
+  for (const k of messageKeywords) {
+    if (ticketKeywords.has(k)) overlap++;
+  }
+  return overlap;
+}
+
+/**
+ * Extract signals from ticket messages.
+ * Returns union of all signals from recent messages (last N messages).
+ */
+function extractTicketSignals(messages: Array<{ text: string }>): string[] {
+  const allSignals = new Set<string>();
+  const recentMessages = messages.slice(-5); // Last 5 messages
+  
+  for (const msg of recentMessages) {
+    const normalized = normalizeMessage(msg.text);
+    normalized.signals.forEach((s) => allSignals.add(s));
+  }
+  
+  return Array.from(allSignals);
+}
+
+/**
+ * Apply guardrails to prevent bad merges.
+ * Returns true if merge should be allowed, false if blocked.
+ */
+function applyGuardrails(params: {
+  sameCategory: boolean;
+  distance: number;
+  overlapCount: number;
+  sameChannel: boolean;
+  minutesSinceTicketUpdate: number;
+}): boolean {
+  const { sameCategory, distance, overlapCount, sameChannel, minutesSinceTicketUpdate } = params;
+
+  // Guardrail: If categories differ AND distance > 0.30, do NOT merge
+  if (!sameCategory && distance > 0.30) {
+    // Exception: Same channel + very recent is strong evidence. Allow merge with overlapCount >= 1.
+    // (e.g. "Request to add CSV export" + "I don't see a button for it" → same issue despite feature_request vs support_question)
+    if (overlapCount >= 1 && sameChannel && minutesSinceTicketUpdate <= 5) {
+      return true; // Exception applies
+    }
+    return false; // Guardrail blocks merge
+  }
+
+  return true; // No guardrail violation
+}
+
+interface LLMMergeCheckResult {
+  should_merge: boolean;
+  confidence: number;
+  reason: string;
+}
+
+/**
+ * Perform gray-zone LLM merge check.
+ * Only called when score is close to threshold or distance is in gray-zone.
+ */
+async function checkLLMMerge(params: {
+  candidateTicket: Ticket;
+  candidateMessages: Array<{ text: string; username: string | null }>;
+  incomingMessage: MessageData;
+  incomingClassification: ClassificationResult;
+}): Promise<LLMMergeCheckResult> {
+  const { candidateTicket, candidateMessages, incomingMessage, incomingClassification } = params;
+
+  const last3Messages = candidateMessages.slice(-3).map((m) => m.text).join('\n\n');
+  const ticketSummary = candidateTicket.summary?.description || candidateTicket.title;
+
+  const prompt = `You are a ticket merge decision system. Determine if an incoming message should be merged into an existing ticket.
+
+EXISTING TICKET:
+Title: ${candidateTicket.title}
+Category: ${candidateTicket.category}
+Summary: ${ticketSummary}
+
+Recent messages in ticket:
+${last3Messages || '(No messages)'}
+
+INCOMING MESSAGE:
+Title: ${incomingClassification.short_title}
+Category: ${incomingClassification.category}
+Signals: ${incomingClassification.signals.join(', ')}
+Text: ${incomingMessage.text}
+
+CRITICAL: Merge ONLY if this is the SAME underlying issue, not just the same broad topic.
+- Same issue: Same bug, same feature request, same support question about the same problem
+- Different issue: Different bugs (even if similar), different features, different problems
+
+Examples:
+- "Login button broken" + "Login button still broken" → MERGE (same issue)
+- "Login button broken" + "Signup form broken" → DO NOT MERGE (different issues, even if both are auth-related)
+- "Add CSV export" + "I don't see CSV export button" → MERGE (same feature request)
+- "Add CSV export" + "Add PDF export" → DO NOT MERGE (different features)
+
+Return your decision with confidence and reason.`;
+
+  try {
+    const completion = await openaiLimiter(async () => {
+      return await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a ticket merge decision system. Analyze whether two messages refer to the same underlying issue.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'merge_check_result',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: {
+                should_merge: { type: 'boolean' },
+                confidence: { type: 'number', minimum: 0, maximum: 1 },
+                reason: { type: 'string' },
+              },
+              required: ['should_merge', 'confidence', 'reason'],
+              additionalProperties: false,
+            },
+          },
+        },
+        temperature: 0.3,
+      });
+    });
+
+    const content = completion.choices[0]?.message?.content;
+    if (!content) {
+      throw new Error('No content in OpenAI response');
+    }
+
+    const parsed = JSON.parse(content);
+    return {
+      should_merge: parsed.should_merge === true,
+      confidence: parseFloat(parsed.confidence) || 0,
+      reason: parsed.reason || '',
+    };
+  } catch (error) {
+    console.error('[Group] LLM merge check error:', error);
+    // On error, default to not merging (safer)
+    return {
+      should_merge: false,
+      confidence: 0,
+      reason: 'LLM check failed',
+    };
+  }
+}
+
+/**
+ * Check if a candidate is in the gray-zone for LLM merge check.
+ */
+function isGrayZone(score: number, threshold: number, distance: number): boolean {
+  // Score is within ±0.05 of threshold
+  if (Math.abs(score - threshold) <= 0.05) {
+    return true;
+  }
+  
+  // Distance is in gray-zone range AND score is close to threshold
+  if (distance >= SIMILARITY_GRAYZONE_LOW && distance <= SIMILARITY_GRAYZONE_HIGH) {
+    if (Math.abs(score - threshold) <= 0.10) {
+      return true;
+    }
+  }
+  
+  return false;
 }
 
 export interface MessageData {
@@ -152,9 +427,13 @@ export async function groupMessage(
     }
   }
 
-  // Step 3: Semantic matching via vector DB — match by ticket content and by message content
+  // Step 3: Semantic matching via vector DB with scored matching
   console.log('[Group] Step 3: Computing embedding for semantic similarity...');
-  const textToEmbed = classification.short_title || messageData.text.substring(0, 500);
+  // Enhanced embedding text: include category, short_title, signals, and original message
+  const signalsText = classification.signals.length > 0 
+    ? classification.signals.join(' ')
+    : '';
+  const textToEmbed = `${classification.category}: ${classification.short_title}\nSignals: ${signalsText}\nMessage: ${messageData.text}`.substring(0, 2000);
   const embedding = await openaiLimiter(async () => {
     const response = await openai.embeddings.create({
       model: 'text-embedding-3-small',
@@ -187,55 +466,129 @@ export async function groupMessage(
     return best.ticketId;
   }
 
-  // Step 3.5: Fallback - check for recent tickets in the same channel
+  // Step 3.5: Fallback - check for recent tickets in the same channel with scored matching
   // This catches sequential messages in the same channel that aren't in a thread
-  // BUT only if the message is semantically similar to the ticket (prevents merging unrelated issues)
   console.log('[Group] Step 3.5: Checking for recent tickets in the same channel...');
   const recentChannelTicket = await findTicketByChannelAndRecentTime(
     messageData.slack_channel_id,
-    5 // 5 minutes window
+    RECENT_WINDOW_MINUTES
   );
+  
   if (recentChannelTicket) {
-    // Check semantic similarity: only attach if message is actually related to the ticket
-    const ticketEmb = recentChannelTicket.embedding;
-    const sameDimension =
-      Array.isArray(ticketEmb) &&
-      Array.isArray(embedding) &&
-      ticketEmb.length === embedding.length;
+    // Fetch full ticket with messages
+    const ticket = await getTicket(recentChannelTicket.id);
+    if (!ticket) {
+      console.log('[Group] Recent ticket not found, proceeding to Step 4');
+    } else {
+      // Check if ticket has embedding for semantic comparison
+      const ticketEmb = ticket.embedding;
+      const sameDimension =
+        Array.isArray(ticketEmb) &&
+        Array.isArray(embedding) &&
+        ticketEmb.length === embedding.length;
 
-    if (ticketEmb && embedding && sameDimension) {
-      const distance = cosineDistance(embedding, ticketEmb);
-      console.log('[Group] Recent ticket found, semantic distance:', distance.toFixed(4), 'threshold:', RECENT_CHANNEL_THRESHOLD);
+      if (ticketEmb && embedding && sameDimension) {
+        // Compute distance
+        const distance = cosineDistance(embedding, ticketEmb);
+        console.log('[Group] Recent ticket found, computing score...');
 
-      if (distance > RECENT_CHANNEL_THRESHOLD) {
-        console.log('[Group] Recent ticket is NOT semantically similar - creating new ticket instead');
-        // Continue to Step 4 to create a new ticket
+        // Compute signal overlap
+        const ticketSignals = extractTicketSignals(ticket.messages);
+        const overlapCount = computeSignalOverlap(classification.signals, ticketSignals);
+
+        // Compute time difference
+        const ticketUpdatedAt = new Date(ticket.updated_at);
+        const now = new Date();
+        const minutesSinceUpdate = Math.floor((now.getTime() - ticketUpdatedAt.getTime()) / (1000 * 60));
+
+        // Same channel (always true for Step 3.5)
+        const sameChannel = true;
+
+        // Check if same category
+        const sameCategory = ticket.category === classification.category;
+
+        // Apply guardrails
+        const guardrailPassed = applyGuardrails({
+          sameCategory,
+          distance,
+          overlapCount,
+          sameChannel,
+          minutesSinceTicketUpdate: minutesSinceUpdate,
+        });
+
+        if (!guardrailPassed) {
+          console.log(`[Group] Recent ticket blocked by guardrails (category: ${ticket.category} vs ${classification.category}, distance: ${distance.toFixed(4)})`);
+        } else {
+          // Compute match score
+          const scoreResult = computeMatchScore({
+            distance,
+            sameChannel,
+            minutesSinceTicketUpdate: minutesSinceUpdate,
+            sameCategory,
+            overlapCount,
+          });
+
+          console.log(`[Group] Recent ticket score: ${scoreResult.score.toFixed(3)}, threshold: ${RECENT_CHANNEL_SCORE_THRESHOLD}, breakdown:`, scoreResult.breakdown);
+
+          // Check if score meets threshold
+          if (scoreResult.score >= RECENT_CHANNEL_SCORE_THRESHOLD) {
+            console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '');
+            await upsertMessage({
+              ...messageData,
+              ticket_id: ticket.id,
+              embedding,
+            });
+            await refreshTicketSummary(ticket.id, classification, messageData);
+            return ticket.id;
+          }
+
+          // Check gray-zone for LLM merge check
+          if (isGrayZone(scoreResult.score, RECENT_CHANNEL_SCORE_THRESHOLD, distance)) {
+            console.log('[Group] Recent ticket score in gray-zone, performing LLM merge check...');
+            const llmResult = await checkLLMMerge({
+              candidateTicket: ticket,
+              candidateMessages: ticket.messages.map((m) => ({
+                text: m.text,
+                username: m.slack_username,
+              })),
+              incomingMessage: messageData,
+              incomingClassification: classification,
+            });
+
+            console.log(`[Group] LLM merge check: should_merge=${llmResult.should_merge}, confidence=${llmResult.confidence.toFixed(3)}, reason="${llmResult.reason}"`);
+
+            if (llmResult.should_merge && llmResult.confidence >= 0.7) {
+              console.log('[Group] LLM check approved merge for recent ticket', ticket.id, isFde ? '(FDE adding context)' : '');
+              await upsertMessage({
+                ...messageData,
+                ticket_id: ticket.id,
+                embedding,
+              });
+              await refreshTicketSummary(ticket.id, classification, messageData);
+              return ticket.id;
+            } else {
+              console.log('[Group] LLM check did not approve merge for recent ticket, proceeding to Step 4');
+            }
+          } else {
+            console.log('[Group] Recent ticket score below threshold and not in gray-zone, proceeding to Step 4');
+          }
+        }
+      } else if (ticketEmb && embedding && !sameDimension) {
+        console.warn(
+          `[Group] Recent ticket embedding dimension mismatch (ticket: ${ticketEmb?.length ?? 0}, message: ${embedding.length}) - creating new ticket`
+        );
       } else {
-        console.log('[Group] Found recent ticket in same channel (semantically similar):', recentChannelTicket.id, isFde ? '(FDE adding context)' : '');
+        // If ticket has no embedding, skip semantic check (attach anyway for backward compatibility)
+        // This handles tickets created before embeddings were added
+        console.log('[Group] Found recent ticket in same channel (no embedding to compare):', ticket.id, isFde ? '(FDE adding context)' : '');
         await upsertMessage({
           ...messageData,
-          ticket_id: recentChannelTicket.id,
+          ticket_id: ticket.id,
           embedding,
         });
-        await refreshTicketSummary(recentChannelTicket.id, classification, messageData);
-        return recentChannelTicket.id;
+        await refreshTicketSummary(ticket.id, classification, messageData);
+        return ticket.id;
       }
-    } else if (ticketEmb && embedding && !sameDimension) {
-      console.warn(
-        '[Group] Recent ticket embedding dimension mismatch (ticket:', ticketEmb?.length ?? 0, ', message:', embedding.length, ') - creating new ticket'
-      );
-      // Continue to Step 4 to create a new ticket
-    } else {
-      // If ticket has no embedding, skip semantic check (attach anyway for backward compatibility)
-      // This handles tickets created before embeddings were added
-      console.log('[Group] Found recent ticket in same channel (no embedding to compare):', recentChannelTicket.id, isFde ? '(FDE adding context)' : '');
-      await upsertMessage({
-        ...messageData,
-        ticket_id: recentChannelTicket.id,
-        embedding,
-      });
-      await refreshTicketSummary(recentChannelTicket.id, classification, messageData);
-      return recentChannelTicket.id;
     }
   }
 

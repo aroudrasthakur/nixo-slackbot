@@ -136,3 +136,36 @@ export async function findSimilarMessage(
     distance: result.distance,
   };
 }
+
+/**
+ * Find multiple ticket candidates via message similarity for scored matching.
+ * Returns top N candidates with metadata needed for scoring.
+ */
+export async function findSimilarMessagesCandidates(
+  embedding: number[],
+  daysBack: number = 14,
+  limit: number = 5
+): Promise<TicketCandidate[]> {
+  const { data, error } = await supabase.rpc('find_similar_messages_candidates', {
+    query_embedding: embedding,
+    days_back: daysBack,
+    ticket_status_filter: 'open',
+    result_limit: limit,
+  });
+
+  if (error) {
+    throw new Error(`Failed to find similar message candidates: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    return [];
+  }
+
+  return data.map((row: any) => ({
+    ticketId: row.ticket_id,
+    distance: row.distance,
+    category: row.category,
+    updatedAt: row.updated_at,
+    canonicalKey: row.canonical_key,
+  }));
+}

@@ -92,8 +92,13 @@ Set each variable:
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `OPENAI_CONCURRENCY` | Max concurrent OpenAI calls | `3` (default) |
 | `CHANNEL_CONTEXT_LIMIT` | Number of recent channel messages to fetch for classification context | `15` (default) |
-| `SIMILARITY_THRESHOLD` | Cosine distance threshold for semantic ticket matching (lower = stricter) | `0.17` (default) |
-| `RECENT_CHANNEL_THRESHOLD` | More lenient threshold for recent-channel grouping (same channel + 5 min) | `0.40` (default) |
+| `SIMILARITY_THRESHOLD` | Cosine distance threshold (deprecated, kept for backward compatibility) | `0.17` (default) |
+| `RECENT_CHANNEL_THRESHOLD` | Recent-channel threshold (deprecated, kept for backward compatibility) | `0.40` (default) |
+| `SCORE_THRESHOLD` | Match score threshold for Step 3 semantic matching (0-1, higher = stricter) | `0.75` (default) |
+| `RECENT_CHANNEL_SCORE_THRESHOLD` | Match score threshold for Step 3.5 recent-channel fallback | `0.65` (default) |
+| `RECENT_WINDOW_MINUTES` | Time window for recent-channel grouping | `5` (default) |
+| `SIMILARITY_GRAYZONE_LOW` | Lower bound of gray-zone distance range for LLM merge check | `0.17` (default) |
+| `SIMILARITY_GRAYZONE_HIGH` | Upper bound of gray-zone distance range for LLM merge check | `0.30` (default) |
 | **Supabase** | | |
 | `SUPABASE_URL` | Supabase project URL | `https://xxxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key | Project Settings → API |
@@ -212,6 +217,7 @@ Whenever a message is attached to an existing ticket, the ticket's summary is re
 - Classification cache (1h TTL, keyed by normalized text, skipped when context is present); p-limit (default 3) on OpenAI calls; Slack events acked immediately; no polling (Socket.IO only).
 - Channel context fetching: Each non-thread message makes one additional Slack API call (`conversations.history`) to fetch recent messages. Consider caching channel history per channel for a short window if rate limits become an issue.
 - **Per-channel message queue:** Messages from the same channel are processed sequentially to prevent race conditions. Messages from different channels can still process in parallel.
+- **Scored matching:** Fetches top 5 candidates from vector search, scores each with multi-factor approach, applies guardrails, and optionally uses LLM for gray-zone cases. This is more robust than single-threshold matching but adds minimal overhead (typically 1-2 additional DB queries per message).
 
 ### Security
 
@@ -225,7 +231,11 @@ Whenever a message is attached to an existing ticket, the ticket's summary is re
   - The prompt looks for pronouns ("it", "that", "this") that may refer to features/issues mentioned in context
   - Generates **specific, descriptive titles** incorporating context (e.g., "User cannot find CSV export button" vs generic "User cannot find button") to improve semantic grouping
 - **Embeddings** (`text-embedding-3-small`, 1536 dimensions):
-  - Cosine distance with two configurable thresholds: `SIMILARITY_THRESHOLD` (default 0.17) for general matching, `RECENT_CHANNEL_THRESHOLD` (default 0.40) for recent-channel fallback
+  - **Enhanced embedding text** includes category, short_title, signals, and original message for better semantic stability
+  - **Scored matching** (industry-standard): Combines semantic similarity (60%) with structural signals (category match, channel match, recency, signal overlap)
+  - Score thresholds: `SCORE_THRESHOLD` (default 0.75) for Step 3, `RECENT_CHANNEL_SCORE_THRESHOLD` (default 0.65) for Step 3.5
+  - **Guardrails** prevent bad merges: Category/distance checks with exceptions for high-overlap recent same-channel matches
+  - **Gray-zone LLM check**: Optional `gpt-4o-mini` call when score is close to threshold to verify if messages refer to the same underlying issue
   - Supabase returns vector columns as strings; the backend parses them to arrays automatically
 - **Summarization** (`gpt-4o-mini`):
   - Generates description, action items, technical details, and priority hint
