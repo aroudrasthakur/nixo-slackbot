@@ -1,0 +1,76 @@
+# ============================================
+# Nixo Slackbot - Dependencies (Node.js / pnpm)
+# ============================================
+# DO NOT use with pip. This is NOT a Python requirements file.
+# Install dependencies with: pnpm install
+#
+# This is a Node.js/pnpm monorepo. Dependencies are managed via
+# package.json files in each workspace. This file is a reference
+# only. For Python tooling, create a separate file (e.g. requirements-py.txt).
+
+# ============================================
+# Root Dependencies
+# ============================================
+typescript@^5.3.3
+
+# ============================================
+# Backend Dependencies (apps/backend)
+# ============================================
+# Runtime Dependencies
+@nixo-slackbot/shared@workspace:*
+@slack/bolt@^3.17.1
+@supabase/supabase-js@^2.39.3
+cors@^2.8.5
+dotenv@^16.3.1
+express@^4.18.2
+openai@^4.24.1
+p-limit@^5.0.0
+socket.io@^4.6.1
+zod@^3.22.4
+
+# Backend Dev Dependencies
+@types/cors@^2.8.17
+@types/express@^4.17.21
+@types/node@^20.11.5
+tsx@^4.7.1
+typescript@^5.3.3
+
+# ============================================
+# Frontend Dependencies (apps/web)
+# ============================================
+# Runtime Dependencies
+@nixo-slackbot/shared@workspace:*
+next@^14.1.0
+react@^18.2.0
+react-dom@^18.2.0
+socket.io-client@^4.6.1
+zod@^3.22.4
+
+# Frontend Dev Dependencies
+@types/node@^20.11.5
+@types/react@^18.2.56
+@types/react-dom@^18.2.19
+dotenv@^16.3.1
+typescript@^5.3.3
+
+# ============================================
+# Shared Package Dependencies (packages/shared)
+# ============================================
+# Runtime Dependencies
+zod@^3.22.4
+
+# Shared Dev Dependencies
+typescript@^5.3.3
+
+# ============================================
+# Installation Instructions
+# ============================================
+# Run from root directory:
+#   pnpm install
+#
+# This will install all dependencies for all workspaces automatically.
+#
+# To install a specific workspace:
+#   pnpm --filter @nixo-slackbot/backend install
+#   pnpm --filter @nixo-slackbot/web install
+#   pnpm --filter @nixo-slackbot/shared install

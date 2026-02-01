@@ -1,0 +1,55 @@
+# Dependencies
+node_modules/
+**/node_modules/
+.pnp
+.pnp.js
+
+# Environment files
+.env
+.env.local
+.env.*.local
+.env.production
+# Keep .env.example as it's the template
+!.env.example
+
+# Build outputs
+.next/
+dist/
+build/
+out/
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.swn
+.DS_Store
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Supabase
+.supabase/
+
+# Python virtual environment (if Python tooling is added)
+venv/
+env/
+ENV/
+.venv/
+.ENV/
+
+# Testing
+coverage/
+.nyc_output/
+
+# Misc
+.cache/
+.turbo/
+_tmp_*

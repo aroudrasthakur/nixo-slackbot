@@ -1,0 +1,14 @@
+{
+  "name": "nixo-slackbot",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "predev": "pnpm --filter \"@nixo-slackbot/shared\" build",
+    "dev": "pnpm --parallel --filter \"@nixo-slackbot/backend\" --filter \"@nixo-slackbot/web\" dev",
+    "build": "pnpm --recursive build",
+    "lint": "pnpm --recursive lint"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
