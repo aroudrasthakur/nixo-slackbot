@@ -6,12 +6,12 @@ The pipeline uses **two** main scoring paths plus **guardrails** and **gray-zone
 
 ## 1. Two Scoring Contexts
 
-| Aspect | **Step 3.5 (Recent Channel)** | **Step 3.6 (CCR / Cross-Channel)** |
-|--------|-------------------------------|-------------------------------------|
-| Function | `computeMatchScore` | `computeCCRMatchScore` |
-| Context | Same channel, recent (e.g. 5 min) | Any channel, longer window (e.g. 14 days) |
-| Threshold | `RECENT_CHANNEL_SCORE_THRESHOLD` (default **0.65**) | `SCORE_THRESHOLD` (default **0.75**) |
-| Rationale | Same channel + recency = strong prior; lower bar | Cross-channel = weaker prior; higher bar |
+| Aspect    | **Step 3.5 (Recent Channel)**                       | **Step 3.6 (CCR / Cross-Channel)**        |
+| --------- | --------------------------------------------------- | ----------------------------------------- |
+| Function  | `computeMatchScore`                                 | `computeCCRMatchScore`                    |
+| Context   | Same channel, recent (e.g. 5 min)                   | Any channel, longer window (e.g. 14 days) |
+| Threshold | `RECENT_CHANNEL_SCORE_THRESHOLD` (default **0.65**) | `SCORE_THRESHOLD` (default **0.75**)      |
+| Rationale | Same channel + recency = strong prior; lower bar    | Cross-channel = weaker prior; higher bar  |
 
 So: **same-channel recent** uses a **lower** threshold and **more structural bonuses**; **cross-channel** uses a **higher** threshold and **less** structural bonus (no same-channel).
 
@@ -94,16 +94,16 @@ Design: **embedding is the main signal**, but **structure** (channel, recency, c
 
 **Formula (conceptually):**
 
-| Component | Condition | Bonus / Penalty |
-|----------|-----------|------------------|
-| Semantic | Always | `(1 - distance/2) * 0.60` (capped 0–0.6) |
-| Category | Same category | +0.10 |
-| Category | Compatible (not "sometimes") | +0.05 |
-| Category | Sometimes compatible | +0.02 |
-| Category | Incompatible | **−0.10** |
-| Structure | Same channel | +0.15 |
-| Structure | Ticket updated ≤ 10 min ago | +0.15 |
-| Structure | overlapCount ≥ 1 | +0.10 |
+| Component | Condition                    | Bonus / Penalty                          |
+| --------- | ---------------------------- | ---------------------------------------- |
+| Semantic  | Always                       | `(1 - distance/2) * 0.60` (capped 0–0.6) |
+| Category  | Same category                | +0.10                                    |
+| Category  | Compatible (not "sometimes") | +0.05                                    |
+| Category  | Sometimes compatible         | +0.02                                    |
+| Category  | Incompatible                 | **−0.10**                                |
+| Structure | Same channel                 | +0.15                                    |
+| Structure | Ticket updated ≤ 10 min ago  | +0.15                                    |
+| Structure | overlapCount ≥ 1             | +0.10                                    |
 
 **Cap:** `score = min(1.0, score)` (can go negative before cap; then min with 1).
 
@@ -123,14 +123,14 @@ So category is a **soft** signal: penalty, not a hard block. Guardrails can stil
 
 **Formula:**
 
-| Component | Condition | Bonus |
-|----------|-----------|--------|
-| Semantic | Always | `(1 - distance/2) * 0.55` |
-| Category | Same category | +0.10 |
-| Category | Compatible | +0.05 |
-| Overlap | overlapCount ≥ 1 | +0.10 |
-| Overlap | overlapCount ≥ 2 | +0.10 (extra) |
-| Recency | Ticket updated ≤ 24 h ago | +0.05 |
+| Component | Condition                 | Bonus                     |
+| --------- | ------------------------- | ------------------------- |
+| Semantic  | Always                    | `(1 - distance/2) * 0.55` |
+| Category  | Same category             | +0.10                     |
+| Category  | Compatible                | +0.05                     |
+| Overlap   | overlapCount ≥ 1          | +0.10                     |
+| Overlap   | overlapCount ≥ 2          | +0.10 (extra)             |
+| Recency   | Ticket updated ≤ 24 h ago | +0.05                     |
 
 **Cap:** `score = max(0, min(1, score))`.
 
@@ -154,6 +154,29 @@ Used in **both** scoring paths and in **guardrails**.
   → −0.10 in 3.5; in CCR no bonus (effectively a penalty relative to "compatible").
 
 So the **score** encodes "same vs compatible vs incompatible" as soft bonuses/penalties; the **guardrails** can still block when evidence is weak.
+
+### Category compatibility matrix
+
+Cell = compatibility when **message category** (row) is compared to **ticket category** (column). Symmetric (e.g. support_question ↔ feature_request is compatible in both directions).
+
+|                      | bug_report       | feature_request  | product_question | support_question | irrelevant   |
+| -------------------- | ---------------- | ---------------- | ---------------- | ---------------- | ------------ |
+| **bug_report**       | <span style="color: green">same</span>             | <span style="color: red">**incompatible**</span> | <span style="color: orange">sometimes</span>        | <span style="color: orange">sometimes</span>        | <span style="color: red">incompatible</span> |
+| **feature_request**  | <span style="color: red">**incompatible**</span> | <span style="color: green">same</span>             | <span style="color: blue">compatible</span>       | <span style="color: blue">compatible</span>       | <span style="color: red">incompatible</span> |
+| **product_question** | <span style="color: orange">sometimes</span>        | <span style="color: blue">compatible</span>       | <span style="color: green">same</span>             | <span style="color: blue">compatible</span>       | <span style="color: red">incompatible</span> |
+| **support_question** | <span style="color: orange">sometimes</span>        | <span style="color: blue">compatible</span>       | <span style="color: blue">compatible</span>       | <span style="color: green">same</span>             | <span style="color: red">incompatible</span> |
+| **irrelevant**       | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: green">same</span>         |
+
+**Score effect (Step 3.5):**
+
+| Match type           | Step 3.5 bonus | Step 3.6 (CCR) bonus  |
+| -------------------- | -------------- | --------------------- |
+| Same category        | +0.10          | +0.10                 |
+| Compatible           | +0.05          | +0.05                 |
+| Sometimes compatible | +0.02          | +0.05 (as compatible) |
+| Incompatible         | −0.10          | 0 (no bonus)          |
+
+Incompatible pairs can still merge when guardrails allow (e.g. strong evidence: same thread, high overlap, or same channel + recent + low distance).
 
 ---
 
