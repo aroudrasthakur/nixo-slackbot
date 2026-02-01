@@ -58,9 +58,60 @@ function cosineDistance(a: number[], b: number[]): number {
   return 1 - cosineSimilarity;
 }
 
+/**
+ * Check if two ticket categories are compatible.
+ * Compatible categories commonly represent the same underlying issue.
+ * Returns compatibility information for scoring and guardrails.
+ */
+function isCategoryCompatible(
+  categoryA: string,
+  categoryB: string
+): { compatible: boolean; isSometimesCompatible: boolean } {
+  // Same category is always compatible
+  if (categoryA === categoryB) {
+    return { compatible: true, isSometimesCompatible: false };
+  }
+
+  // Always compatible pairs
+  const alwaysCompatiblePairs = [
+    ['support_question', 'product_question'],
+    ['support_question', 'feature_request'],
+    ['product_question', 'feature_request'],
+  ];
+
+  for (const [a, b] of alwaysCompatiblePairs) {
+    if (
+      (categoryA === a && categoryB === b) ||
+      (categoryA === b && categoryB === a)
+    ) {
+      return { compatible: true, isSometimesCompatible: false };
+    }
+  }
+
+  // Sometimes compatible pairs (compatible but may apply penalty)
+  const sometimesCompatiblePairs = [
+    ['support_question', 'bug_report'],
+    ['product_question', 'bug_report'],
+  ];
+
+  for (const [a, b] of sometimesCompatiblePairs) {
+    if (
+      (categoryA === a && categoryB === b) ||
+      (categoryA === b && categoryB === a)
+    ) {
+      return { compatible: true, isSometimesCompatible: true };
+    }
+  }
+
+  // Incompatible by default (bug_report ↔ feature_request)
+  // Can still merge with strong evidence (handled in guardrails)
+  return { compatible: false, isSometimesCompatible: false };
+}
+
 export interface MatchScoreBreakdown {
   semanticSim: number;
   sameCategory: boolean;
+  categoryMatch: 'same' | 'compatible' | 'sometimes_compatible' | 'incompatible';
   sameChannel: boolean;
   recentUpdate: boolean;
   signalOverlap: number;
@@ -80,10 +131,11 @@ function computeMatchScore(params: {
   distance: number;
   sameChannel: boolean;
   minutesSinceTicketUpdate: number;
+  categoryCompatibility: { compatible: boolean; isSometimesCompatible: boolean };
   sameCategory: boolean;
   overlapCount: number;
 }): MatchScoreResult {
-  const { distance, sameChannel, minutesSinceTicketUpdate, sameCategory, overlapCount } = params;
+  const { distance, sameChannel, minutesSinceTicketUpdate, categoryCompatibility, sameCategory, overlapCount } = params;
 
   // Semantic similarity: convert distance [0..2] to similarity [0..1]
   // Clamp to ensure we don't go negative or above 1
@@ -91,10 +143,23 @@ function computeMatchScore(params: {
 
   let score = semanticSim;
 
-  // Structural signals
+  // Category signal (soft, not hard blocker)
+  let categoryMatch: 'same' | 'compatible' | 'sometimes_compatible' | 'incompatible';
   if (sameCategory) {
     score += 0.10;
+    categoryMatch = 'same';
+  } else if (categoryCompatibility.compatible && !categoryCompatibility.isSometimesCompatible) {
+    score += 0.05; // Compatible categories
+    categoryMatch = 'compatible';
+  } else if (categoryCompatibility.isSometimesCompatible) {
+    score += 0.02; // Sometimes compatible (small positive)
+    categoryMatch = 'sometimes_compatible';
+  } else {
+    score -= 0.10; // Incompatible (penalty, not block)
+    categoryMatch = 'incompatible';
   }
+
+  // Structural signals
   if (sameChannel) {
     score += 0.15;
   }
@@ -105,7 +170,7 @@ function computeMatchScore(params: {
     score += 0.10;
   }
 
-  // Cap score at 1.0
+  // Cap score at 1.0, but allow negative scores (they'll fail threshold anyway)
   score = Math.min(1.0, score);
 
   return {
@@ -113,6 +178,7 @@ function computeMatchScore(params: {
     breakdown: {
       semanticSim,
       sameCategory,
+      categoryMatch,
       sameChannel,
       recentUpdate: minutesSinceTicketUpdate <= 10,
       signalOverlap: overlapCount,
@@ -176,27 +242,49 @@ function extractTicketSignals(messages: Array<{ text: string }>): string[] {
 /**
  * Apply guardrails to prevent bad merges.
  * Returns true if merge should be allowed, false if blocked.
+ * Guardrails are evidence-based, not category-based. Categories are soft signals.
  */
 function applyGuardrails(params: {
-  sameCategory: boolean;
+  categoryCompatible: boolean;
+  isSometimesCompatible: boolean;
   distance: number;
   overlapCount: number;
   sameChannel: boolean;
   minutesSinceTicketUpdate: number;
+  sameThread: boolean;
 }): boolean {
-  const { sameCategory, distance, overlapCount, sameChannel, minutesSinceTicketUpdate } = params;
+  const {
+    categoryCompatible,
+    distance,
+    overlapCount,
+    sameChannel,
+    minutesSinceTicketUpdate,
+    sameThread,
+  } = params;
 
-  // Guardrail: If categories differ AND distance > 0.30, do NOT merge
-  if (!sameCategory && distance > 0.30) {
-    // Exception: Same channel + very recent is strong evidence. Allow merge with overlapCount >= 1.
-    // (e.g. "Request to add CSV export" + "I don't see a button for it" → same issue despite feature_request vs support_question)
-    if (overlapCount >= 1 && sameChannel && minutesSinceTicketUpdate <= 5) {
-      return true; // Exception applies
-    }
+  // Strong evidence overrides incompatibility (even if categories are incompatible)
+  if (sameThread) {
+    return true; // Same thread is strongest evidence
+  }
+  if (overlapCount >= 2 && distance <= 0.30) {
+    return true; // High overlap + low distance
+  }
+  if (sameChannel && minutesSinceTicketUpdate <= RECENT_WINDOW_MINUTES && distance <= 0.30) {
+    return true; // Same channel + recent + low distance
+  }
+
+  // Block only if: NOT compatible AND distance > 0.35 AND overlapCount == 0 AND NOT sameThread AND NOT (sameChannel AND recent)
+  if (
+    !categoryCompatible &&
+    distance > 0.35 &&
+    overlapCount === 0 &&
+    !sameThread &&
+    !(sameChannel && minutesSinceTicketUpdate <= RECENT_WINDOW_MINUTES)
+  ) {
     return false; // Guardrail blocks merge
   }
 
-  return true; // No guardrail violation
+  return true; // Allow merge (score threshold will determine final decision)
 }
 
 interface LLMMergeCheckResult {
@@ -307,20 +395,33 @@ Return your decision with confidence and reason.`;
 
 /**
  * Check if a candidate is in the gray-zone for LLM merge check.
+ * Triggers more often when categories differ to avoid false splits.
  */
-function isGrayZone(score: number, threshold: number, distance: number): boolean {
+function isGrayZone(
+  score: number,
+  threshold: number,
+  distance: number,
+  sameCategory: boolean
+): boolean {
   // Score is within ±0.05 of threshold
   if (Math.abs(score - threshold) <= 0.05) {
     return true;
   }
-  
+
+  // If categories differ, use wider window (±0.08) to trigger LLM check more often
+  if (!sameCategory) {
+    if (Math.abs(score - threshold) <= 0.08) {
+      return true;
+    }
+  }
+
   // Distance is in gray-zone range AND score is close to threshold
   if (distance >= SIMILARITY_GRAYZONE_LOW && distance <= SIMILARITY_GRAYZONE_HIGH) {
     if (Math.abs(score - threshold) <= 0.10) {
       return true;
     }
   }
-  
+
   return false;
 }
 
@@ -337,7 +438,23 @@ export interface MessageData {
 }
 
 /**
+ * Get category precedence for escalation.
+ * Higher precedence categories are more urgent/actionable.
+ */
+function getCategoryPrecedence(category: string): number {
+  const precedence: Record<string, number> = {
+    bug_report: 4,
+    feature_request: 3,
+    support_question: 2,
+    product_question: 1,
+    irrelevant: 0,
+  };
+  return precedence[category] || 0;
+}
+
+/**
  * Refresh ticket summary and optionally merge assignees when a new message is attached.
+ * Also escalates ticket category if new message has higher precedence.
  */
 async function refreshTicketSummary(
   ticketId: string,
@@ -359,18 +476,37 @@ async function refreshTicketSummary(
 
     console.log('[Group] Refreshing summary for ticket:', ticketId, 'messages:', messages.length);
 
+    // Check if category should be escalated
+    const currentPrecedence = getCategoryPrecedence(ticket.category);
+    const newPrecedence = getCategoryPrecedence(latestClassification.category);
+    let updatedCategory = ticket.category;
+
+    if (newPrecedence > currentPrecedence && latestClassification.category !== 'irrelevant') {
+      updatedCategory = latestClassification.category as typeof ticket.category;
+      console.log(
+        `[Group] Escalating ticket category: ${ticket.category} → ${updatedCategory} (precedence: ${currentPrecedence} → ${newPrecedence})`
+      );
+    }
+
     const summary = await generateTicketSummaryFromConversation({
       ticketTitle: ticket.title,
-      ticketCategory: ticket.category,
+      ticketCategory: updatedCategory,
       messages,
       assignees: mergedAssignees,
       reporterUsername: ticket.reporter_username || null,
     });
 
-    await updateTicket(ticketId, {
+    const updateData: Partial<Ticket> = {
       summary,
       assignees: mergedAssignees,
-    });
+    };
+
+    // Update category if escalated
+    if (updatedCategory !== ticket.category) {
+      updateData.category = updatedCategory;
+    }
+
+    await updateTicket(ticketId, updateData);
 
     console.log('[Group] Summary updated for ticket:', ticketId);
   } catch (error) {
@@ -507,31 +643,57 @@ export async function groupMessage(
         // Check if same category
         const sameCategory = ticket.category === classification.category;
 
-        // Apply guardrails
+        // Compute category compatibility
+        const categoryCompatibility = isCategoryCompatible(ticket.category, classification.category);
+        console.log(
+          `[Group] Category: ${ticket.category} vs ${classification.category}, compatible: ${categoryCompatibility.compatible}, sometimesCompatible: ${categoryCompatibility.isSometimesCompatible}`
+        );
+
+        // Apply guardrails (evidence-based, not category-based)
         const guardrailPassed = applyGuardrails({
-          sameCategory,
+          categoryCompatible: categoryCompatibility.compatible,
+          isSometimesCompatible: categoryCompatibility.isSometimesCompatible,
           distance,
           overlapCount,
           sameChannel,
           minutesSinceTicketUpdate: minutesSinceUpdate,
+          sameThread: false, // Step 3.5 is channel-based, not thread-based
         });
 
         if (!guardrailPassed) {
-          console.log(`[Group] Recent ticket blocked by guardrails (category: ${ticket.category} vs ${classification.category}, distance: ${distance.toFixed(4)})`);
+          console.log(
+            `[Group] Guardrail check: compatible=${categoryCompatibility.compatible}, distance=${distance.toFixed(4)}, overlap=${overlapCount}, sameChannel=${sameChannel}, minutesSinceUpdate=${minutesSinceUpdate}, sameThread=false, decision=BLOCK`
+          );
         } else {
           // Compute match score
           const scoreResult = computeMatchScore({
             distance,
             sameChannel,
             minutesSinceTicketUpdate: minutesSinceUpdate,
+            categoryCompatibility,
             sameCategory,
             overlapCount,
           });
 
-          console.log(`[Group] Recent ticket score: ${scoreResult.score.toFixed(3)}, threshold: ${RECENT_CHANNEL_SCORE_THRESHOLD}, breakdown:`, scoreResult.breakdown);
+          console.log(
+            `[Group] Recent ticket score: ${scoreResult.score.toFixed(3)}, threshold: ${RECENT_CHANNEL_SCORE_THRESHOLD}, breakdown:`,
+            scoreResult.breakdown
+          );
+          console.log(
+            `[Group] Guardrail check: compatible=${categoryCompatibility.compatible}, distance=${distance.toFixed(4)}, overlap=${overlapCount}, sameChannel=${sameChannel}, minutesSinceUpdate=${minutesSinceUpdate}, sameThread=false, decision=ALLOW`
+          );
 
-          // Check if score meets threshold
-          if (scoreResult.score >= RECENT_CHANNEL_SCORE_THRESHOLD) {
+          // Semantic topic guard: Prevent merging unrelated topics in Step 3.5
+          // If distance is high (> 0.45) AND no signal overlap, this is likely a different topic
+          // Even if score passes threshold due to sameChannel + recentUpdate bonuses
+          const TOPIC_DISTANCE_THRESHOLD = 0.45;
+          if (distance > TOPIC_DISTANCE_THRESHOLD && overlapCount === 0) {
+            console.log(
+              `[Group] Topic guard: High distance (${distance.toFixed(4)}) and zero overlap - message is about different topic. Not merging despite score ${scoreResult.score.toFixed(3)}.`
+            );
+            // Continue to Step 4 to create new ticket
+          } else if (scoreResult.score >= RECENT_CHANNEL_SCORE_THRESHOLD) {
+            // Check if score meets threshold
             console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '');
             await upsertMessage({
               ...messageData,
@@ -540,10 +702,8 @@ export async function groupMessage(
             });
             await refreshTicketSummary(ticket.id, classification, messageData);
             return ticket.id;
-          }
-
-          // Check gray-zone for LLM merge check
-          if (isGrayZone(scoreResult.score, RECENT_CHANNEL_SCORE_THRESHOLD, distance)) {
+          } else if (isGrayZone(scoreResult.score, RECENT_CHANNEL_SCORE_THRESHOLD, distance, sameCategory)) {
+            // Check gray-zone for LLM merge check (only if topic guard didn't block)
             console.log('[Group] Recent ticket score in gray-zone, performing LLM merge check...');
             const llmResult = await checkLLMMerge({
               candidateTicket: ticket,

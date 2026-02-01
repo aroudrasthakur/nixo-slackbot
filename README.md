@@ -168,21 +168,11 @@ When a new Slack message arrives, it goes through a multi-step matching process 
 - Check if any **open** ticket has the same `canonical_key`
 - **If match found:** Attach message to that ticket, refresh summary → **Done**
 
-#### Step 3: Semantic Similarity Matching
-- Generate embedding for the message using `text-embedding-3-small` (1536 dimensions)
-- The embedding is computed from the AI-generated `short_title` (or raw text if no title)
-- Search for similar **open** tickets from the last 14 days using cosine distance
-- Also search for similar messages (by message content embedding)
-- Pick the best match (lowest distance) from either search
-- **If distance ≤ `SIMILARITY_THRESHOLD` (default 0.17):** Attach message to that ticket, refresh summary → **Done**
+#### Step 3: Scored Semantic Matching
+See detailed description above in the "Scored Semantic Matching" section. Uses multi-factor scoring with category compatibility as a soft signal.
 
-#### Step 3.5: Recent Channel Fallback
-- If no semantic match, check for any ticket in the **same channel** updated within the **last 5 minutes**
-- This catches sequential messages in a channel that aren't in a thread
-- Compare the message embedding to the recent ticket's embedding
-- Uses a **more lenient threshold** (`RECENT_CHANNEL_THRESHOLD`, default 0.40) since temporal + channel constraints already provide context
-- **If distance ≤ threshold:** Attach message to that ticket, refresh summary → **Done**
-- **If distance > threshold:** The messages are not semantically similar enough → proceed to create new ticket
+#### Step 3.5: Recent Channel Fallback (Scored)
+See detailed description above in the "Recent Channel Fallback (Scored)" section. Uses the same scoring approach with a lower threshold.
 
 #### Step 4: Create New Ticket
 - If no match found in any step, create a new ticket with:
@@ -202,6 +192,7 @@ Whenever a message is attached to an existing ticket, the ticket's summary is re
 - All messages in the ticket are passed to the AI summarizer
 - The summary, action items, and technical details are updated
 - **Priority is escalated** if newer messages indicate higher urgency (e.g., "by tonight", "ASAP", "critical")
+- **Category escalation**: If the new message's category has higher precedence than the ticket's current category, the ticket category is updated. Precedence order: `bug_report` > `feature_request` > `support_question` > `product_question`. This ensures tickets reflect the most urgent/actionable category.
 
 ### Deduplication
 
@@ -232,10 +223,10 @@ Whenever a message is attached to an existing ticket, the ticket's summary is re
   - Generates **specific, descriptive titles** incorporating context (e.g., "User cannot find CSV export button" vs generic "User cannot find button") to improve semantic grouping
 - **Embeddings** (`text-embedding-3-small`, 1536 dimensions):
   - **Enhanced embedding text** includes category, short_title, signals, and original message for better semantic stability
-  - **Scored matching** (industry-standard): Combines semantic similarity (60%) with structural signals (category match, channel match, recency, signal overlap)
+  - **Scored matching** (industry-standard): Combines semantic similarity (60%) with structural signals (category compatibility as soft signal, channel match, recency, signal overlap)
   - Score thresholds: `SCORE_THRESHOLD` (default 0.75) for Step 3, `RECENT_CHANNEL_SCORE_THRESHOLD` (default 0.65) for Step 3.5
-  - **Guardrails** prevent bad merges: Category/distance checks with exceptions for high-overlap recent same-channel matches
-  - **Gray-zone LLM check**: Optional `gpt-4o-mini` call when score is close to threshold to verify if messages refer to the same underlying issue
+  - **Evidence-based guardrails**: Only block merges when categories are incompatible AND evidence is weak (high distance, no overlap, not same thread/channel). Compatible categories (e.g., feature_request + support_question) merge naturally.
+  - **Gray-zone LLM check**: Optional `gpt-4o-mini` call when score is close to threshold (or when categories differ) to verify if messages refer to the same underlying issue
   - Supabase returns vector columns as strings; the backend parses them to arrays automatically
 - **Summarization** (`gpt-4o-mini`):
   - Generates description, action items, technical details, and priority hint
