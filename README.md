@@ -148,17 +148,55 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
    - **Channel context:** For non-thread messages, fetches the last 15 channel messages (configurable via `CHANNEL_CONTEXT_LIMIT`) to detect indirect references (e.g., "I cannot see a button for it" where "it" refers to a feature mentioned earlier).
    - The classifier uses both context types to determine if a message is relevant, even when it seems vague in isolation.
 
-### Grouping Algorithm
+### Grouping Algorithm (Step-by-Step Message Matching)
 
-Messages are processed sequentially per channel (queue-based) to prevent race conditions where concurrent messages don't find each other's tickets.
+When a new Slack message arrives, it goes through a multi-step matching process to determine whether to attach it to an existing ticket or create a new one. Messages from the same channel are processed sequentially (queue-based) to prevent race conditions.
 
-1. **Thread:** If `root_thread_ts` matches an existing message in an open ticket, attach to that ticket. `root_thread_ts = event.thread_ts ?? event.ts` (stored on every message).
-2. **Canonical key:** From normalized text + signals (error codes, platform, feature keywords). If an open ticket has the same `canonical_key`, attach.
-3. **Vector similarity:** Embed `short_title` with `text-embedding-3-small` (1536 dims). Search open tickets from last 14 days by cosine distance (`<=>`). If distance ≤ `SIMILARITY_THRESHOLD` (default 0.17), attach to best match.
-4. **Recent channel fallback:** If no match found, check for tickets in the same channel within the last 5 minutes. Uses a more lenient threshold (`RECENT_CHANNEL_THRESHOLD`, default 0.40) since temporal and channel constraints already provide context.
-5. **Create new ticket:** If no match, create a new ticket with AI-generated summary and priority.
+#### Step 1: Thread Matching
+- Check if the message's `root_thread_ts` matches any message in an existing **open** ticket
+- `root_thread_ts` = `event.thread_ts ?? event.ts` (stored on every message)
+- **If match found:** Attach message to that ticket, refresh summary → **Done**
 
-**FDE Messages:** Messages from the FDE user (defined by `FDE_USER_ID`) can add context to existing tickets but cannot create new tickets.
+#### Step 2: Canonical Key Matching
+- Compute a `canonical_key` from normalized text + extracted signals (error codes, platform names, feature keywords)
+- Example: "Hey could you add export to CSV?" → canonical key: `feature_export`
+- Check if any **open** ticket has the same `canonical_key`
+- **If match found:** Attach message to that ticket, refresh summary → **Done**
+
+#### Step 3: Semantic Similarity Matching
+- Generate embedding for the message using `text-embedding-3-small` (1536 dimensions)
+- The embedding is computed from the AI-generated `short_title` (or raw text if no title)
+- Search for similar **open** tickets from the last 14 days using cosine distance
+- Also search for similar messages (by message content embedding)
+- Pick the best match (lowest distance) from either search
+- **If distance ≤ `SIMILARITY_THRESHOLD` (default 0.17):** Attach message to that ticket, refresh summary → **Done**
+
+#### Step 3.5: Recent Channel Fallback
+- If no semantic match, check for any ticket in the **same channel** updated within the **last 5 minutes**
+- This catches sequential messages in a channel that aren't in a thread
+- Compare the message embedding to the recent ticket's embedding
+- Uses a **more lenient threshold** (`RECENT_CHANNEL_THRESHOLD`, default 0.40) since temporal + channel constraints already provide context
+- **If distance ≤ threshold:** Attach message to that ticket, refresh summary → **Done**
+- **If distance > threshold:** The messages are not semantically similar enough → proceed to create new ticket
+
+#### Step 4: Create New Ticket
+- If no match found in any step, create a new ticket with:
+  - Title from AI classification's `short_title`
+  - Category from classification
+  - AI-generated summary with description, action items, technical details, and priority hint
+  - The message's embedding stored for future similarity matching
+- Attach the message to the new ticket → **Done**
+
+#### FDE Message Handling
+Messages from the FDE user (defined by `FDE_USER_ID`) follow the same matching steps, but:
+- Can **attach to existing tickets** (Steps 1-3.5) to add context
+- **Cannot create new tickets** (Step 4 is skipped) - if no match is found, the message is not stored
+
+#### Summary Refresh on Attach
+Whenever a message is attached to an existing ticket, the ticket's summary is regenerated from the full conversation:
+- All messages in the ticket are passed to the AI summarizer
+- The summary, action items, and technical details are updated
+- **Priority is escalated** if newer messages indicate higher urgency (e.g., "by tonight", "ASAP", "critical")
 
 ### Deduplication
 
