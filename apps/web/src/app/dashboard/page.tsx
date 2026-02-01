@@ -1,5 +1,4 @@
-import { DashboardTickets } from "@/components/DashboardTickets";
-import { StatsCards } from "@/components/StatsCards";
+import { DashboardContent } from "@/components/DashboardContent";
 import type { Ticket } from "@nixo-slackbot/shared";
 
 async function getTickets(): Promise<{ tickets: Ticket[]; error?: string }> {
@@ -65,49 +64,10 @@ export default async function DashboardPage() {
           padding: "24px",
         }}
       >
-        {/* Connection error */}
-        {error && (
-          <div
-            style={{
-              padding: "16px 20px",
-              marginBottom: "24px",
-              backgroundColor: "#fef0f0",
-              border: "1px solid #e01e5a",
-              borderRadius: "8px",
-              color: "#e01e5a",
-              fontSize: "14px",
-            }}
-          >
-            {error} Ensure the backend is running on the URL in <code style={{ fontSize: "12px" }}>NEXT_PUBLIC_API_URL</code> and try again.
-          </div>
-        )}
-
-        {/* Stats Cards */}
-        <StatsCards tickets={tickets} />
-
-        {/* Section Header */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "16px",
-          }}
-        >
-          <h2
-            style={{
-              fontSize: "16px",
-              fontWeight: 600,
-              color: "#1d1c1d",
-              margin: 0,
-            }}
-          >
-            All Tickets
-          </h2>
-        </div>
-
-        {/* Tickets */}
-        <DashboardTickets initialTickets={tickets} />
+        <DashboardContent
+          initialTickets={tickets}
+          initialError={error}
+        />
       </div>
     </div>
   );

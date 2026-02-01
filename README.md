@@ -1,6 +1,6 @@
 # Nixo Slackbot + Realtime Dashboard
 
-A minimal Slackbot system for Forward-Deployed Engineers (FDEs) that detects relevant customer messages in Slack, classifies them using OpenAI, groups related messages into tickets using vector similarity, and displays them in a realtime Next.js dashboard.
+A Slackbot system for Forward-Deployed Engineers (FDEs) that detects relevant customer messages in Slack, classifies them using OpenAI, groups related messages into tickets using vector similarity, and displays them in a realtime Next.js dashboard with filtering, priority tracking, and ticket management.
 
 ## Architecture
 
@@ -59,7 +59,7 @@ This installs dependencies for all workspaces (backend, web, shared). Dependenci
 
 1. Create an app at [api.slack.com/apps](https://api.slack.com/apps) (Create New App → From scratch).
 2. **Socket Mode:** **Socket Mode** → Enable Socket Mode → Generate App-Level Token with scope `connections:write` → copy token (`xapp-`) → `SLACK_APP_TOKEN`. Store it; it is shown only once.
-3. **Bot scopes:** **OAuth & Permissions** → Bot Token Scopes → add `channels:history`, `channels:read`, and optionally `chat:write`. For private channels add `groups:history`, `groups:read`.
+3. **Bot scopes:** **OAuth & Permissions** → Bot Token Scopes → add `channels:history` (required for channel context fetching), `channels:read`, and optionally `chat:write`. For private channels add `groups:history`, `groups:read`. The `channels:history` scope enables the bot to fetch recent channel messages for classification context.
 4. **Events:** **Event Subscriptions** → Enable Events → Subscribe to bot events → add `message.channels` (required), optionally `message.groups` → Save.
 5. **Install:** **Install App** → Install to Workspace → copy **Bot User OAuth Token** (`xoxb-`) → `SLACK_BOT_TOKEN`.
 6. **Signing secret (optional):** **Basic Information** → App Credentials → **Signing Secret** → `SLACK_SIGNING_SECRET`.
@@ -91,6 +91,9 @@ Set each variable:
 | **OpenAI** | | |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
 | `OPENAI_CONCURRENCY` | Max concurrent OpenAI calls | `3` (default) |
+| `CHANNEL_CONTEXT_LIMIT` | Number of recent channel messages to fetch for classification context | `15` (default) |
+| `SIMILARITY_THRESHOLD` | Cosine distance threshold for semantic ticket matching (lower = stricter) | `0.17` (default) |
+| `RECENT_CHANNEL_THRESHOLD` | More lenient threshold for recent-channel grouping (same channel + 5 min) | `0.40` (default) |
 | **Supabase** | | |
 | `SUPABASE_URL` | Supabase project URL | `https://xxxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Service role key | Project Settings → API |
@@ -140,13 +143,22 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 ### Relevance Detection
 
 1. **Heuristic filter:** Ignores casual messages (e.g. thanks, ok, cool).
-2. **OpenAI classification:** `gpt-4o-mini` with Structured Outputs; categories: `bug_report`, `support_question`, `feature_request`, `product_question`, `irrelevant`. Only messages with `is_relevant: true` become tickets.
+2. **Context-aware OpenAI classification:** `gpt-4o-mini` with Structured Outputs; categories: `bug_report`, `support_question`, `feature_request`, `product_question`, `irrelevant`. Only messages with `is_relevant: true` become tickets.
+   - **Thread context:** For messages in a Slack thread, fetches previous messages in that thread to understand follow-ups and clarifications.
+   - **Channel context:** For non-thread messages, fetches the last 15 channel messages (configurable via `CHANNEL_CONTEXT_LIMIT`) to detect indirect references (e.g., "I cannot see a button for it" where "it" refers to a feature mentioned earlier).
+   - The classifier uses both context types to determine if a message is relevant, even when it seems vague in isolation.
 
 ### Grouping Algorithm
 
+Messages are processed sequentially per channel (queue-based) to prevent race conditions where concurrent messages don't find each other's tickets.
+
 1. **Thread:** If `root_thread_ts` matches an existing message in an open ticket, attach to that ticket. `root_thread_ts = event.thread_ts ?? event.ts` (stored on every message).
 2. **Canonical key:** From normalized text + signals (error codes, platform, feature keywords). If an open ticket has the same `canonical_key`, attach.
-3. **Vector similarity:** Embed `short_title` with `text-embedding-3-small` (1536 dims). Search open tickets from last 14 days by cosine distance (`<=>`). If distance ≤ 0.17, attach to best match; else create a new ticket.
+3. **Vector similarity:** Embed `short_title` with `text-embedding-3-small` (1536 dims). Search open tickets from last 14 days by cosine distance (`<=>`). If distance ≤ `SIMILARITY_THRESHOLD` (default 0.17), attach to best match.
+4. **Recent channel fallback:** If no match found, check for tickets in the same channel within the last 5 minutes. Uses a more lenient threshold (`RECENT_CHANNEL_THRESHOLD`, default 0.40) since temporal and channel constraints already provide context.
+5. **Create new ticket:** If no match, create a new ticket with AI-generated summary and priority.
+
+**FDE Messages:** Messages from the FDE user (defined by `FDE_USER_ID`) can add context to existing tickets but cannot create new tickets.
 
 ### Deduplication
 
@@ -159,7 +171,9 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 
 ### Performance
 
-- Classification cache (1h TTL, keyed by normalized text); p-limit (default 3) on OpenAI calls; Slack events acked immediately; no polling (Socket.IO only).
+- Classification cache (1h TTL, keyed by normalized text, skipped when context is present); p-limit (default 3) on OpenAI calls; Slack events acked immediately; no polling (Socket.IO only).
+- Channel context fetching: Each non-thread message makes one additional Slack API call (`conversations.history`) to fetch recent messages. Consider caching channel history per channel for a short window if rate limits become an issue.
+- **Per-channel message queue:** Messages from the same channel are processed sequentially to prevent race conditions. Messages from different channels can still process in parallel.
 
 ### Security
 
@@ -167,7 +181,42 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 
 ### AI Usage
 
-- Classification: OpenAI Structured Outputs (not JSON mode), `gpt-4o-mini`. Embeddings: `text-embedding-3-small` (1536). Vector similarity: cosine distance `<=>`, threshold 0.17.
+- **Classification** (`gpt-4o-mini` with Structured Outputs):
+  - Thread context (for thread replies): Previous messages in the same Slack thread
+  - Channel context (for non-thread messages): Last N channel messages (default 15, configurable via `CHANNEL_CONTEXT_LIMIT`) to detect indirect references
+  - The prompt looks for pronouns ("it", "that", "this") that may refer to features/issues mentioned in context
+  - Generates **specific, descriptive titles** incorporating context (e.g., "User cannot find CSV export button" vs generic "User cannot find button") to improve semantic grouping
+- **Embeddings** (`text-embedding-3-small`, 1536 dimensions):
+  - Cosine distance with two configurable thresholds: `SIMILARITY_THRESHOLD` (default 0.17) for general matching, `RECENT_CHANNEL_THRESHOLD` (default 0.40) for recent-channel fallback
+  - Supabase returns vector columns as strings; the backend parses them to arrays automatically
+- **Summarization** (`gpt-4o-mini`):
+  - Generates description, action items, technical details, and priority hint
+  - When messages are grouped, the summary is regenerated from the full conversation
+  - **Priority escalation:** If newer messages indicate higher urgency ("by tonight", "ASAP", "critical"), priority is automatically raised
+
+---
+
+## Dashboard Features
+
+### Ticket List
+- **Full-width search bar** with instant filtering by ticket title
+- **Filters panel** (expandable with smooth animation):
+  - Date: All time, Last 7/30/90 days
+  - Category: Bug report, Support question, Feature request, Product question
+  - Priority: Critical, High, Medium, Low
+  - Status: Open, Resolved, Closed
+- **Priority badges** on ticket cards (color-coded: Critical=red, High=amber, Medium=blue, Low=gray)
+- **Real-time updates** via Socket.IO when tickets are created, updated, or resolved
+
+### Ticket Detail Page
+- Full ticket information: title, category, status, priority, dates, reporter, assignees
+- AI-generated summary with description, action items, and technical details
+- Message timeline showing all grouped messages
+- **Resolve/Reopen button** to change ticket status (persisted to DB, broadcasts update via socket)
+
+### Sidebar
+- Fixed position sidebar that remains stable during content changes
+- User profile section with sign-out functionality
 
 ---
 

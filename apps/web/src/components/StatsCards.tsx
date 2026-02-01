@@ -11,7 +11,6 @@ export function StatsCards({ tickets }: StatsCardsProps) {
   const totalTickets = tickets.length;
   const openTickets = tickets.filter((t) => t.status === "open").length;
   const resolvedTickets = tickets.filter((t) => t.status === "resolved").length;
-  const closedTickets = tickets.filter((t) => t.status === "closed").length;
 
   // Get tickets from last 24 hours
   const recentTickets = tickets.filter((t) => {
@@ -49,12 +48,6 @@ export function StatsCards({ tickets }: StatsCardsProps) {
       value: resolvedTickets,
       color: "#1264a3",
       bgColor: "#e3f2fd",
-    },
-    {
-      label: "Closed",
-      value: closedTickets,
-      color: "#616061",
-      bgColor: "#f5f5f5",
     },
   ];
 

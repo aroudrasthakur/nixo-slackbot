@@ -40,11 +40,15 @@ export function Sidebar() {
   return (
     <aside
       style={{
+        position: "fixed",
+        top: 0,
+        left: 0,
         width: "260px",
-        minHeight: "100vh",
+        height: "100vh",
         backgroundColor: "#3F0E40",
         display: "flex",
         flexDirection: "column",
+        zIndex: 100,
       }}
     >
       {/* Logo/Brand */}

@@ -1,12 +1,53 @@
 import { supabase } from './client';
-import type { Ticket, TicketWithMessages, TicketStatus } from '@nixo-slackbot/shared';
+import type { Ticket, TicketWithMessages, TicketStatus, TicketSummary } from '@nixo-slackbot/shared';
 import { getMessagesByTicketId } from './messages';
+
+/**
+ * Parse a pgvector embedding returned by Supabase.
+ * Supabase returns vector columns as strings like "[0.1, 0.2, ...]".
+ * This function converts them to proper number arrays.
+ */
+function parseEmbedding(embedding: unknown): number[] | null {
+  if (embedding === null || embedding === undefined) {
+    return null;
+  }
+  // Already a number array
+  if (Array.isArray(embedding) && typeof embedding[0] === 'number') {
+    return embedding as number[];
+  }
+  // String format from Supabase/pgvector: "[0.1, 0.2, ...]"
+  if (typeof embedding === 'string') {
+    try {
+      const parsed = JSON.parse(embedding);
+      if (Array.isArray(parsed) && (parsed.length === 0 || typeof parsed[0] === 'number')) {
+        return parsed as number[];
+      }
+    } catch {
+      console.warn('[DB] Failed to parse embedding string:', embedding.substring(0, 50));
+    }
+  }
+  return null;
+}
+
+/**
+ * Normalize a raw ticket row from Supabase, parsing the embedding field.
+ */
+function normalizeTicket(row: Record<string, unknown>): Ticket {
+  return {
+    ...row,
+    embedding: parseEmbedding(row.embedding),
+  } as Ticket;
+}
 
 export interface TicketInsert {
   title: string;
   category: 'bug_report' | 'support_question' | 'feature_request' | 'product_question';
   canonical_key?: string | null;
   embedding?: number[] | null;
+  assignees?: string[];
+  reporter_user_id?: string | null;
+  reporter_username?: string | null;
+  summary?: TicketSummary | null;
 }
 
 export async function findTicketByRootThreadTs(rootThreadTs: string): Promise<Ticket | null> {
@@ -37,7 +78,7 @@ export async function findTicketByRootThreadTs(rootThreadTs: string): Promise<Ti
     throw new Error(`Failed to find ticket by root_thread_ts: ${error.message}`);
   }
 
-  return data as Ticket;
+  return normalizeTicket(data as Record<string, unknown>);
 }
 
 export async function findTicketByCanonicalKey(canonicalKey: string): Promise<Ticket | null> {
@@ -56,7 +97,7 @@ export async function findTicketByCanonicalKey(canonicalKey: string): Promise<Ti
     throw new Error(`Failed to find ticket by canonical_key: ${error.message}`);
   }
 
-  return data as Ticket;
+  return normalizeTicket(data as Record<string, unknown>);
 }
 
 export async function findSimilarTicket(
@@ -106,6 +147,10 @@ export async function createTicket(data: TicketInsert): Promise<Ticket> {
         status: 'open',
         canonical_key: data.canonical_key || null,
         embedding: data.embedding || null,
+        assignees: data.assignees || [],
+        reporter_user_id: data.reporter_user_id || null,
+        reporter_username: data.reporter_username || null,
+        summary: data.summary || null,
       })
       .select()
       .single();
@@ -126,7 +171,7 @@ export async function createTicket(data: TicketInsert): Promise<Ticket> {
     }
 
     console.log('[DB] Ticket created successfully:', ticket.id);
-    return ticket as Ticket;
+    return normalizeTicket(ticket as Record<string, unknown>);
   } catch (error: any) {
     console.error('[DB] Exception creating ticket:', error);
     // Handle unique constraint violation
@@ -155,7 +200,7 @@ export async function updateTicket(id: string, updates: Partial<Ticket>): Promis
     throw new Error(`Failed to update ticket: ${error.message}`);
   }
 
-  return data as Ticket;
+  return normalizeTicket(data as Record<string, unknown>);
 }
 
 export async function attachMessageToTicket(ticketId: string, messageId: string): Promise<void> {
@@ -185,7 +230,7 @@ export async function getTicket(id: string): Promise<TicketWithMessages | null> 
     throw new Error(`Failed to get ticket: ${error.message}`);
   }
 
-  const ticket = data as Ticket;
+  const ticket = normalizeTicket(data as Record<string, unknown>);
   const messages = await getMessagesByTicketId(ticket.id);
 
   return {
@@ -207,5 +252,64 @@ export async function getTickets(status?: TicketStatus): Promise<Ticket[]> {
     throw new Error(`Failed to get tickets: ${error.message}`);
   }
 
-  return (data || []) as Ticket[];
+  return (data || []).map((row) => normalizeTicket(row as Record<string, unknown>));
+}
+
+/**
+ * Find the most recent open ticket in the same channel within a time window.
+ * Useful for grouping sequential messages in the same channel that aren't in a thread.
+ */
+export async function findTicketByChannelAndRecentTime(
+  channelId: string,
+  minutesBack: number = 5
+): Promise<Ticket | null> {
+  const cutoffTime = new Date();
+  cutoffTime.setMinutes(cutoffTime.getMinutes() - minutesBack);
+
+  // Find messages in the same channel created within the time window
+  const { data: messages, error: messagesError } = await supabase
+    .from('messages')
+    .select('ticket_id, created_at')
+    .eq('slack_channel_id', channelId)
+    .gte('created_at', cutoffTime.toISOString())
+    .order('created_at', { ascending: false })
+    .limit(10);
+
+  if (messagesError || !messages || messages.length === 0) {
+    return null;
+  }
+
+  // Get unique ticket IDs from the messages
+  const ticketIds = [...new Set(messages.map((m) => m.ticket_id))];
+
+  // Find the most recent open ticket among these
+  const { data: tickets, error: ticketsError } = await supabase
+    .from('tickets')
+    .select('*')
+    .in('id', ticketIds)
+    .eq('status', 'open')
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .single();
+
+  if (ticketsError) {
+    if (ticketsError.code === 'PGRST116') {
+      return null; // Not found
+    }
+    throw new Error(`Failed to find ticket by channel and recent time: ${ticketsError.message}`);
+  }
+
+  return normalizeTicket(tickets as Record<string, unknown>);
+}
+
+export async function deleteTicket(id: string): Promise<void> {
+  // Messages are deleted via ON DELETE CASCADE
+  const { error } = await supabase
+    .from('tickets')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    throw new Error(`Failed to delete ticket: ${error.message}`);
+  }
 }

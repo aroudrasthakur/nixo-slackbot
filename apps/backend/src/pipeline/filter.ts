@@ -24,11 +24,12 @@ export function shouldProcessMessage(normalizedText: string): boolean {
     return false;
   }
 
-  // Check if message matches any ignore pattern
+  // Only skip messages that are *only* the pattern (exact or with trailing punctuation),
+  // so we don't drop real support messages that happen to end with "thanks" etc.
   for (const pattern of IGNORE_PATTERNS) {
-    if (trimmed === pattern || trimmed.startsWith(pattern + ' ') || trimmed.endsWith(' ' + pattern)) {
-      return false;
-    }
+    if (trimmed === pattern) return false;
+    const withPunctuation = trimmed.replace(/[.,!?]+$/, '').trim();
+    if (withPunctuation === pattern) return false;
   }
 
   return true;

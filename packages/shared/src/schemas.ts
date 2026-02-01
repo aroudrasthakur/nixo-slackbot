@@ -16,6 +16,14 @@ export const ClassificationResultSchema = z.object({
   confidence: z.number().min(0).max(1),
   short_title: z.string(),
   signals: z.array(z.string()),
+  inferred_assignees: z.array(z.string()),
+});
+
+export const TicketSummarySchema = z.object({
+  description: z.string(),
+  action_items: z.array(z.string()),
+  technical_details: z.string().nullable(),
+  priority_hint: z.enum(['low', 'medium', 'high', 'critical']),
 });
 
 export const TicketSchema = z.object({
@@ -25,6 +33,10 @@ export const TicketSchema = z.object({
   status: TicketStatusSchema,
   canonical_key: z.string().nullable(),
   embedding: z.array(z.number()).nullable(),
+  assignees: z.array(z.string()),
+  reporter_user_id: z.string().nullable(),
+  reporter_username: z.string().nullable(),
+  summary: TicketSummarySchema.nullable(),
   created_at: z.string(),
   updated_at: z.string(),
 });
@@ -36,6 +48,7 @@ export const MessageSchema = z.object({
   slack_ts: z.string(),
   root_thread_ts: z.string(), // Not null
   slack_user_id: z.string(),
+  slack_username: z.string().nullable(),
   slack_team_id: z.string().nullable(),
   slack_event_id: z.string().nullable(),
   text: z.string(),

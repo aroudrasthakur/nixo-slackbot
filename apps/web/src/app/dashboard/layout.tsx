@@ -15,8 +15,19 @@ export default function DashboardLayout({
           backgroundColor: "#ffffff",
         }}
       >
+        {/* Fixed sidebar */}
         <Sidebar />
-        <main style={{ flex: 1, backgroundColor: "#ffffff" }}>{children}</main>
+        {/* Main content with left margin to account for fixed sidebar */}
+        <main
+          style={{
+            flex: 1,
+            marginLeft: "260px",
+            backgroundColor: "#ffffff",
+            minHeight: "100vh",
+          }}
+        >
+          {children}
+        </main>
       </div>
     </ProtectedRoute>
   );
