@@ -7,6 +7,8 @@ import { groupMessage } from '../pipeline/group';
 import { emitTicketUpdated } from '../socket/events';
 import { getSlackUsername } from './users.js';
 import { getThreadContext, getChannelHistory } from './threads.js';
+import { getOpenAIEmbedding } from '../db/client';
+import { getCrossChannelContext } from '../db/messages';
 
 const FDE_USER_ID = process.env.FDE_USER_ID;
 
@@ -174,12 +176,28 @@ async function processMessageAsync(messageData: {
     const normalized = normalizeMessage(messageData.text);
     console.log('[Pipeline] Normalized:', normalized.normalizedText.substring(0, 100));
 
-    // Classify with thread context or channel context
+    // Fetch cross-channel context (DB RAG) for classification
+    let crossChannelContext;
+    try {
+      const embedding = await getOpenAIEmbedding(messageData.text);
+      const daysBack = parseInt(process.env.CROSS_CHANNEL_DAYS || '14', 10);
+      crossChannelContext = await getCrossChannelContext(embedding, daysBack);
+      console.log('[Pipeline] Cross-channel context:', {
+        tickets: crossChannelContext.tickets.length,
+        messages: crossChannelContext.messages.length,
+      });
+    } catch (error) {
+      console.error('[Pipeline] Error fetching cross-channel context:', error);
+      crossChannelContext = undefined;
+    }
+
+    // Classify with thread context, channel context, and cross-channel context
     const classification = await classifyMessage(
       messageData.text,
       normalized.normalizedText,
       threadContext,
-      channelContext
+      channelContext,
+      crossChannelContext
     );
     console.log('[Pipeline] Classification result:', {
       is_relevant: classification.is_relevant,
@@ -191,9 +209,9 @@ async function processMessageAsync(messageData: {
       has_channel_context: !!channelContext && channelContext.messages.length > 0,
     });
 
-    // Only process relevant messages
+    // Handle irrelevant messages: attempt to attach to existing ticket as context-only
     if (!classification.is_relevant) {
-      console.log('[Pipeline] ❌ Message classified as IRRELEVANT:', {
+      console.log('[Pipeline] ❌ Message classified as IRRELEVANT, attempting context-only attachment:', {
         text: messageData.text.substring(0, 150),
         category: classification.category,
         confidence: classification.confidence,
@@ -202,7 +220,25 @@ async function processMessageAsync(messageData: {
         has_channel_context: !!channelContext && channelContext.messages.length > 0,
         ts: messageData.slack_ts,
       });
-      console.log('[Pipeline] Skipping ticket creation for irrelevant message');
+      
+      // Attempt to attach to existing ticket (groupMessage will try to find a match)
+      // If attached, it will be stored with is_context_only=true
+      try {
+        const ticketId = await groupMessage(
+          { ...messageData, slack_username: slackUsername },
+          classification,
+          { is_fde: messageData.is_fde, is_context_only: true }
+        );
+        
+        if (ticketId) {
+          console.log('[Pipeline] Context-only message attached to ticket:', ticketId);
+          emitTicketUpdated(ticketId);
+        } else {
+          console.log('[Pipeline] Context-only message could not be attached to any ticket, skipping');
+        }
+      } catch (error) {
+        console.error('[Pipeline] Error attempting context-only attachment:', error);
+      }
       return;
     }
 

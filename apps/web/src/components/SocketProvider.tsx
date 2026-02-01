@@ -13,6 +13,7 @@ import type { Socket } from "socket.io-client";
 interface SocketContextValue {
   socket: Socket | null;
   onTicketUpdated: (callback: (ticketId: string) => void) => () => void;
+  onConnect: (callback: () => void) => () => void;
 }
 
 const SocketContext = createContext<SocketContextValue | null>(null);
@@ -46,8 +47,23 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     [socket]
   );
 
+  const onConnect = useCallback(
+    (callback: () => void) => {
+      if (!socket) {
+        return () => {};
+      }
+
+      socket.on("connect", callback);
+
+      return () => {
+        socket.off("connect", callback);
+      };
+    },
+    [socket]
+  );
+
   return (
-    <SocketContext.Provider value={{ socket, onTicketUpdated }}>
+    <SocketContext.Provider value={{ socket, onTicketUpdated, onConnect }}>
       {children}
     </SocketContext.Provider>
   );

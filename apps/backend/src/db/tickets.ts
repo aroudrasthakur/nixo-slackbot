@@ -131,6 +131,83 @@ export async function findSimilarTicket(
   };
 }
 
+export interface TicketCandidate {
+  ticketId: string;
+  distance: number;
+  category: string;
+  updatedAt: string;
+  canonicalKey: string | null;
+  slackChannelId?: string; // For cross-channel logging
+}
+
+/**
+ * Find multiple ticket candidates for scored matching.
+ * Returns top N candidates with metadata needed for scoring.
+ */
+export async function findSimilarTicketsCandidates(
+  embedding: number[],
+  daysBack: number = 14,
+  limit: number = 5
+): Promise<TicketCandidate[]> {
+  const { data, error } = await supabase.rpc('find_similar_tickets_candidates', {
+    query_embedding: embedding,
+    days_back: daysBack,
+    ticket_status: 'open',
+    result_limit: limit,
+  });
+
+  if (error) {
+    throw new Error(`Failed to find similar ticket candidates: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    return [];
+  }
+
+  return data.map((row: any) => ({
+    ticketId: row.ticket_id,
+    distance: row.distance,
+    category: row.category,
+    updatedAt: row.updated_at,
+    canonicalKey: row.canonical_key,
+    slackChannelId: row.slack_channel_id || undefined,
+  }));
+}
+
+/**
+ * Find cross-channel ticket candidates for CCR (Cross-Channel Context Retrieval).
+ * Returns top K tickets from last CROSS_CHANNEL_DAYS using vector search.
+ */
+export async function findCrossChannelTicketCandidates(
+  embedding: number[],
+  daysBack: number = 14,
+  limit: number = 15
+): Promise<TicketCandidate[]> {
+  const { data, error } = await supabase.rpc('find_cross_channel_ticket_candidates', {
+    query_embedding: embedding,
+    days_back: daysBack,
+    ticket_status: 'open',
+    result_limit: limit,
+  });
+
+  if (error) {
+    throw new Error(`Failed to find cross-channel ticket candidates: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    return [];
+  }
+
+  return data.map((row: any) => ({
+    ticketId: row.ticket_id,
+    distance: row.distance,
+    category: row.category,
+    updatedAt: row.updated_at,
+    canonicalKey: row.canonical_key,
+    slackChannelId: row.slack_channel_id || undefined,
+  }));
+}
+
 export async function createTicket(data: TicketInsert): Promise<Ticket> {
   try {
     console.log('[DB] Creating ticket:', {
