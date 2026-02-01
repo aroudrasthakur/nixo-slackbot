@@ -9,12 +9,14 @@ import {
   updateTicket,
   getTicket,
   findSimilarTicketsCandidates,
+  findCrossChannelTicketCandidates,
   type TicketCandidate,
 } from '../db/tickets';
-import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates } from '../db/messages';
-import { normalizeMessage } from './normalize';
+import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates, findCrossChannelMessageCandidates } from '../db/messages';
+import { normalizeMessage, computeCanonicalKey } from './normalize';
 import { openaiLimiter } from './limiter';
 import { generateTicketSummary, generateTicketSummaryFromConversation } from './summarize';
+import { emitTicketUpdated } from '../socket/events';
 
 const SIMILARITY_DAYS_BACK = parseInt(process.env.SIMILARITY_DAYS_BACK || '14', 10);
 const SIMILARITY_THRESHOLD = parseFloat(process.env.SIMILARITY_THRESHOLD || '0.17');
@@ -28,6 +30,11 @@ const RECENT_CHANNEL_SCORE_THRESHOLD = parseFloat(process.env.RECENT_CHANNEL_SCO
 const RECENT_WINDOW_MINUTES = parseInt(process.env.RECENT_WINDOW_MINUTES || '5', 10);
 const SIMILARITY_GRAYZONE_LOW = parseFloat(process.env.SIMILARITY_GRAYZONE_LOW || '0.17');
 const SIMILARITY_GRAYZONE_HIGH = parseFloat(process.env.SIMILARITY_GRAYZONE_HIGH || '0.30');
+
+// Cross-Channel Context Retrieval (CCR) configuration
+const CROSS_CHANNEL_DAYS = parseInt(process.env.CROSS_CHANNEL_DAYS || '14', 10);
+const MATCH_TOPK_TICKETS = parseInt(process.env.MATCH_TOPK_TICKETS || '15', 10);
+const MATCH_TOPK_MESSAGES = parseInt(process.env.MATCH_TOPK_MESSAGES || '25', 10);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -425,6 +432,233 @@ function isGrayZone(
   return false;
 }
 
+/**
+ * Compute CCR (Cross-Channel Context Retrieval) match score.
+ * Uses different weighting than Step 3.5: semanticSim*0.55 + category + overlap + recency bonuses.
+ */
+function computeCCRMatchScore(params: {
+  distance: number;
+  sameCategory: boolean;
+  categoryCompatibility: { compatible: boolean; isSometimesCompatible: boolean };
+  overlapCount: number;
+  updatedAt: string; // ISO timestamp
+}): MatchScoreResult {
+  const { distance, sameCategory, categoryCompatibility, overlapCount, updatedAt } = params;
+
+  // Base semantic similarity score (clamped to [0, 1])
+  const semanticSim = Math.max(0, Math.min(1, 1 - distance / 2));
+  let score = semanticSim * 0.55;
+
+  // Category bonuses
+  if (sameCategory) {
+    score += 0.10;
+  } else if (categoryCompatibility.compatible) {
+    score += 0.05;
+  }
+
+  // Signal overlap bonuses
+  if (overlapCount >= 1) {
+    score += 0.10;
+  }
+  if (overlapCount >= 2) {
+    score += 0.10; // Extra bonus for high overlap
+  }
+
+  // Recency bonus (soft boost if updated within 24h)
+  const updatedTime = new Date(updatedAt).getTime();
+  const now = Date.now();
+  const hoursSinceUpdate = (now - updatedTime) / (1000 * 60 * 60);
+  if (hoursSinceUpdate <= 24) {
+    score += 0.05;
+  }
+
+  // Clamp to [0, 1]
+  score = Math.max(0, Math.min(1, score));
+
+  return {
+    score,
+    breakdown: {
+      semanticSim,
+      sameCategory,
+      categoryMatch: sameCategory ? 'same' : (categoryCompatibility.compatible ? 'compatible' : (categoryCompatibility.isSometimesCompatible ? 'sometimes_compatible' : 'incompatible')),
+      sameChannel: false, // CCR is cross-channel
+      recentUpdate: hoursSinceUpdate <= 24,
+      signalOverlap: overlapCount,
+      totalScore: score,
+    },
+  };
+}
+
+/**
+ * Evidence-based guardrails for CCR.
+ * Uses rare token list to prevent over-merging for broad topic matches with weak evidence.
+ */
+function applyCCRGuardrails(params: {
+  distance: number;
+  overlapCount: number;
+  messageSignals: string[];
+  ticketSignals: string[];
+}): boolean {
+  const { distance, overlapCount, messageSignals, ticketSignals } = params;
+
+  // Rare token list: specific terms that indicate strong evidence
+  const RARE_TOKENS = new Set([
+    'budget', 'csv', 'export', 'rbac', 'admin', 'superadmin', '403', '401', '500',
+    'invoice', 'oauth', 'sso', 'dashboard', 'analytics', 'pdf', 'report'
+  ]);
+
+  // Check if any rare tokens are shared
+  const messageTokens = new Set(messageSignals.map(s => s.toLowerCase()));
+  const ticketTokens = new Set(ticketSignals.map(s => s.toLowerCase()));
+  let hasRareTokenOverlap = false;
+  for (const token of RARE_TOKENS) {
+    if (messageTokens.has(token) && ticketTokens.has(token)) {
+      hasRareTokenOverlap = true;
+      break;
+    }
+  }
+
+  // Block merge only when:
+  // - No signal overlap AND
+  // - High distance (> 0.35) AND
+  // - No rare token overlap AND
+  // - NOT (high overlap + low distance)
+  if (
+    overlapCount === 0 &&
+    distance > 0.35 &&
+    !hasRareTokenOverlap &&
+    !(overlapCount >= 2 && distance <= 0.45)
+  ) {
+    return false; // Block merge
+  }
+
+  // Allow merge when:
+  // - At least one rare token shared OR
+  // - High overlap (>= 2) OR
+  // - Strong semantic similarity (distance <= 0.30)
+  if (hasRareTokenOverlap || overlapCount >= 2 || distance <= 0.30) {
+    return true; // Allow merge
+  }
+
+  return true; // Default: allow (score threshold will determine final decision)
+}
+
+/**
+ * Check if CCR candidate is in gray-zone for LLM merge check.
+ */
+function isCCRGrayZone(score: number, threshold: number, distance: number, overlapCount: number): boolean {
+  // Trigger LLM check if:
+  // - Score within 0.08 below threshold OR
+  // - Distance in [0.25, 0.55] AND overlapCount >= 1
+  return (
+    (score >= threshold - 0.08 && score < threshold) ||
+    (distance >= 0.25 && distance <= 0.55 && overlapCount >= 1)
+  );
+}
+
+/**
+ * Perform gray-zone LLM merge check for CCR.
+ */
+async function checkCCRLLMMerge(params: {
+  candidateTicket: Ticket;
+  candidateMessages: Array<{ text: string; username: string | null }>;
+  incomingMessage: MessageData;
+  incomingClassification: ClassificationResult;
+}): Promise<LLMMergeCheckResult> {
+  const { candidateTicket, candidateMessages, incomingMessage, incomingClassification } = params;
+
+  const last5Messages = candidateMessages.slice(-5).map((m) => `${m.username || 'User'}: ${m.text}`).join('\n\n');
+  const ticketSummary = candidateTicket.summary?.description || candidateTicket.title;
+  const ticketChannelId = candidateMessages.length > 0 ? (candidateMessages[0] as any).slack_channel_id || 'unknown' : 'unknown';
+
+  const prompt = `You are a cross-channel ticket merge decision system. Determine if an incoming message from a DIFFERENT channel should be merged into an existing ticket.
+
+EXISTING TICKET (from different channel):
+Title: ${candidateTicket.title}
+Category: ${candidateTicket.category}
+Summary: ${ticketSummary}
+Channel: ${ticketChannelId}
+
+Recent messages in ticket:
+${last5Messages || '(No messages)'}
+
+INCOMING MESSAGE (from current channel):
+Title: ${incomingClassification.short_title}
+Category: ${incomingClassification.category}
+Signals: ${incomingClassification.signals.join(', ')}
+Text: ${incomingMessage.text}
+Channel: ${incomingMessage.slack_channel_id}
+
+CRITICAL: This is a CROSS-CHANNEL merge decision. Be more conservative than same-channel merges.
+- Merge ONLY if this is clearly the SAME underlying issue across channels
+- Different channels often mean different contexts, so require stronger evidence
+- Same issue: Same bug reported in different channels, same feature request mentioned elsewhere
+- Different issue: Similar topics but different problems, different features, different contexts
+
+Examples:
+- "CSV export broken" (channel A) + "CSV export still broken" (channel B) → MERGE (same issue, cross-channel)
+- "Add CSV export" (channel A) + "I don't see CSV export button" (channel B) → MERGE (same feature, cross-channel)
+- "Login broken" (channel A) + "Signup broken" (channel B) → DO NOT MERGE (different issues, even if both auth-related)
+
+Return your decision with confidence and reason.`;
+
+  try {
+    const completion = await openaiLimiter(async () => {
+      return await openai.chat.completions.create({
+        model: 'gpt-4o-mini',
+        messages: [
+          {
+            role: 'system',
+            content: 'You are a cross-channel ticket merge decision system. Analyze whether messages from different channels refer to the same underlying issue.',
+          },
+          {
+            role: 'user',
+            content: prompt,
+          },
+        ],
+        response_format: {
+          type: 'json_schema',
+          json_schema: {
+            name: 'ccr_merge_check',
+            strict: true,
+            schema: {
+              type: 'object',
+              properties: {
+                should_merge: { type: 'boolean' },
+                confidence: { type: 'number', minimum: 0, maximum: 1 },
+                reason: { type: 'string' },
+              },
+              required: ['should_merge', 'confidence', 'reason'],
+              additionalProperties: false,
+            },
+          },
+        },
+        temperature: 0.2,
+      });
+    });
+
+    const content = completion.choices[0]?.message?.content;
+    if (!content) {
+      throw new Error('No content in OpenAI response');
+    }
+
+    const parsed = JSON.parse(content);
+    return {
+      should_merge: parsed.should_merge === true,
+      confidence: Math.max(0, Math.min(1, parsed.confidence || 0)),
+      reason: parsed.reason || 'No reason provided',
+    };
+  } catch (error) {
+    console.error('[Group] Error in CCR LLM merge check:', error);
+    // Conservative fallback: don't merge on error
+    return {
+      should_merge: false,
+      confidence: 0,
+      reason: `Error during LLM check: ${error instanceof Error ? error.message : 'Unknown error'}`,
+    };
+  }
+}
+
 export interface MessageData {
   slack_channel_id: string;
   slack_ts: string;
@@ -516,6 +750,7 @@ async function refreshTicketSummary(
 
 export interface GroupOptions {
   is_fde?: boolean;
+  is_context_only?: boolean;
 }
 
 export async function groupMessage(
@@ -524,6 +759,7 @@ export async function groupMessage(
   options?: GroupOptions
 ): Promise<string | null> {
   const isFde = options?.is_fde ?? false;
+  const isContextOnly = options?.is_context_only ?? false;
   // Step 1: Check thread grouping
   console.log('[Group] Step 1: Checking thread grouping for root_thread_ts:', messageData.root_thread_ts);
   const threadTicket = await findTicketByRootThreadTs(messageData.root_thread_ts);
@@ -534,31 +770,34 @@ export async function groupMessage(
       ticket_id: threadTicket.id,
     });
     await refreshTicketSummary(threadTicket.id, classification, messageData);
+    emitTicketUpdated(threadTicket.id);
     return threadTicket.id;
   }
 
-  // Step 2: Compute canonical_key and check for match
-  console.log('[Group] Step 2: Computing canonical key...');
+  // Step 2: Compute entity-based canonical_key and check for match (works globally across channels)
+  console.log('[Group] Step 2: Computing entity-based canonical key...');
   const normalized = normalizeMessage(messageData.text);
-  const canonicalKey = normalized.signals.length > 0
-    ? normalized.signals.join('_')
-    : normalized.normalizedText
-        .substring(0, 50)
-        .replace(/[^a-z0-9]/g, '_')
-        .replace(/_+/g, '_')
-        .replace(/^_|_$/g, '');
+  // Use entity-based canonical key from signals
+  const canonicalKey = computeCanonicalKey(normalized.signals) || 
+    normalized.normalizedText
+      .substring(0, 50)
+      .replace(/[^a-z0-9]/g, '_')
+      .replace(/_+/g, '_')
+      .replace(/^_|_$/g, '');
 
-  console.log('[Group] Canonical key:', canonicalKey);
+  console.log('[Group] Canonical key:', canonicalKey, 'signals:', normalized.signals);
 
   if (canonicalKey) {
     const canonicalTicket = await findTicketByCanonicalKey(canonicalKey);
     if (canonicalTicket) {
-      console.log('[Group] Found existing ticket via canonical key:', canonicalTicket.id, isFde ? '(FDE adding context)' : '');
+      console.log('[Group] Found existing ticket via canonical key:', canonicalTicket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
       await upsertMessage({
         ...messageData,
         ticket_id: canonicalTicket.id,
+        is_context_only: isContextOnly,
       });
       await refreshTicketSummary(canonicalTicket.id, classification, messageData);
+      emitTicketUpdated(canonicalTicket.id);
       return canonicalTicket.id;
     }
   }
@@ -597,8 +836,10 @@ export async function groupMessage(
       ...messageData,
       ticket_id: best.ticketId,
       embedding,
+      is_context_only: isContextOnly,
     });
     await refreshTicketSummary(best.ticketId, classification, messageData);
+    emitTicketUpdated(best.ticketId);
     return best.ticketId;
   }
 
@@ -694,13 +935,15 @@ export async function groupMessage(
             // Continue to Step 4 to create new ticket
           } else if (scoreResult.score >= RECENT_CHANNEL_SCORE_THRESHOLD) {
             // Check if score meets threshold
-            console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '');
+            console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
             await upsertMessage({
               ...messageData,
               ticket_id: ticket.id,
               embedding,
+              is_context_only: isContextOnly,
             });
             await refreshTicketSummary(ticket.id, classification, messageData);
+            emitTicketUpdated(ticket.id);
             return ticket.id;
           } else if (isGrayZone(scoreResult.score, RECENT_CHANNEL_SCORE_THRESHOLD, distance, sameCategory)) {
             // Check gray-zone for LLM merge check (only if topic guard didn't block)
@@ -725,6 +968,7 @@ export async function groupMessage(
                 embedding,
               });
               await refreshTicketSummary(ticket.id, classification, messageData);
+              emitTicketUpdated(ticket.id);
               return ticket.id;
             } else {
               console.log('[Group] LLM check did not approve merge for recent ticket, proceeding to Step 4');
@@ -740,15 +984,228 @@ export async function groupMessage(
       } else {
         // If ticket has no embedding, skip semantic check (attach anyway for backward compatibility)
         // This handles tickets created before embeddings were added
-        console.log('[Group] Found recent ticket in same channel (no embedding to compare):', ticket.id, isFde ? '(FDE adding context)' : '');
+        console.log('[Group] Found recent ticket in same channel (no embedding to compare):', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
         await upsertMessage({
           ...messageData,
           ticket_id: ticket.id,
           embedding,
+          is_context_only: isContextOnly,
         });
         await refreshTicketSummary(ticket.id, classification, messageData);
+        emitTicketUpdated(ticket.id);
         return ticket.id;
       }
+    }
+  }
+
+  // Step 3.6: Cross-Channel Context Retrieval (CCR)
+  // Fetch candidates from DB using vector search across channels and days
+  if (embedding) {
+    console.log('[Group] Step 3.6: Cross-Channel Context Retrieval (CCR)...');
+    
+    try {
+      // Fetch candidates from ticket and message vector search
+      const ticketCandidates = await findCrossChannelTicketCandidates(embedding, CROSS_CHANNEL_DAYS, MATCH_TOPK_TICKETS);
+      const messageCandidates = await findCrossChannelMessageCandidates(embedding, CROSS_CHANNEL_DAYS, MATCH_TOPK_MESSAGES);
+      
+      // Also check canonical key match (if not already found in Step 2)
+      let canonicalCandidate: TicketCandidate | null = null;
+      if (canonicalKey) {
+        const canonicalTicket = await findTicketByCanonicalKey(canonicalKey);
+        if (canonicalTicket) {
+          // Check if already in candidates
+          const alreadyInCandidates = [...ticketCandidates, ...messageCandidates].some(
+            c => c.ticketId === canonicalTicket.id
+          );
+          if (!alreadyInCandidates) {
+            // Compute distance for canonical match
+            const ticketEmb = canonicalTicket.embedding;
+            if (ticketEmb && Array.isArray(ticketEmb) && ticketEmb.length === embedding.length) {
+              const distance = cosineDistance(embedding, ticketEmb);
+              // Get channel ID from messages
+              const canonicalTicketMessages = await getMessagesByTicketId(canonicalTicket.id);
+              const canonicalTicketChannelId = canonicalTicketMessages.length > 0 ? canonicalTicketMessages[0].slack_channel_id : undefined;
+              canonicalCandidate = {
+                ticketId: canonicalTicket.id,
+                distance,
+                category: canonicalTicket.category,
+                updatedAt: canonicalTicket.updated_at,
+                canonicalKey: canonicalTicket.canonical_key,
+                ...(canonicalTicketChannelId && { slackChannelId: canonicalTicketChannelId }),
+              };
+            }
+          }
+        }
+      }
+
+      // Union and deduplicate candidates by ticket_id
+      const allCandidates = new Map<string, TicketCandidate>();
+      for (const c of [...ticketCandidates, ...messageCandidates]) {
+        const existing = allCandidates.get(c.ticketId);
+        if (!existing || c.distance < existing.distance) {
+          allCandidates.set(c.ticketId, c);
+        }
+      }
+      if (canonicalCandidate) {
+        const existing = allCandidates.get(canonicalCandidate.ticketId);
+        if (!existing || canonicalCandidate.distance < existing.distance) {
+          allCandidates.set(canonicalCandidate.ticketId, canonicalCandidate);
+        }
+      }
+
+      const candidates = Array.from(allCandidates.values());
+      console.log(`[Group] CCR found ${candidates.length} unique candidate tickets`);
+
+      if (candidates.length > 0) {
+        // Score each candidate
+        const scoredCandidates: Array<{
+          candidate: TicketCandidate;
+          ticket: Ticket;
+          score: number;
+          distance: number;
+          overlapCount: number;
+          scoreBreakdown: MatchScoreBreakdown;
+        }> = [];
+
+        for (const candidate of candidates) {
+          try {
+            const ticket = await getTicket(candidate.ticketId);
+            if (!ticket || ticket.status !== 'open') {
+              continue; // Skip closed tickets
+            }
+
+            // Get ticket messages for signal extraction and channel ID check
+            const ticketMessages = await getMessagesByTicketId(ticket.id);
+
+            // Skip if same channel (already handled in Step 3.5)
+            // Get channel ID from first message (ticket doesn't have slack_channel_id directly)
+            const ticketChannelId = ticketMessages.length > 0 ? ticketMessages[0].slack_channel_id : null;
+            if (ticketChannelId === messageData.slack_channel_id) {
+              continue;
+            }
+            const ticketSignals = extractTicketSignals(ticketMessages.map(m => ({ text: m.text })));
+            const messageSignals = classification.signals || [];
+            const overlapCount = computeSignalOverlap(messageSignals, ticketSignals);
+
+            // Compute CCR match score
+            const categoryCompatibility = isCategoryCompatible(classification.category, ticket.category);
+            const scoreResult = computeCCRMatchScore({
+              distance: candidate.distance,
+              sameCategory: classification.category === ticket.category,
+              categoryCompatibility,
+              overlapCount,
+              updatedAt: candidate.updatedAt,
+            });
+
+            // Apply CCR guardrails
+            const guardrailPassed = applyCCRGuardrails({
+              distance: candidate.distance,
+              overlapCount,
+              messageSignals,
+              ticketSignals,
+            });
+
+            if (!guardrailPassed) {
+              console.log(
+                `[Group] CCR candidate ${candidate.ticketId} blocked by guardrails (distance: ${candidate.distance.toFixed(4)}, overlap: ${overlapCount})`
+              );
+              continue;
+            }
+
+            scoredCandidates.push({
+              candidate,
+              ticket,
+              score: scoreResult.score,
+              distance: candidate.distance,
+              overlapCount,
+              scoreBreakdown: scoreResult.breakdown,
+            });
+          } catch (error) {
+            console.error(`[Group] Error processing CCR candidate ${candidate.ticketId}:`, error);
+            continue;
+          }
+        }
+
+        // Sort by score (descending) and log top 5
+        scoredCandidates.sort((a, b) => b.score - a.score);
+        const top5 = scoredCandidates.slice(0, 5);
+        console.log('[Group] CCR top 5 candidates:');
+        for (let i = 0; i < top5.length; i++) {
+          const item = top5[i];
+          console.log(
+            `[Group] CCR candidate ${i + 1}: ticket=${item.candidate.ticketId}, distance=${item.distance.toFixed(4)}, overlap=${item.overlapCount}, score=${item.score.toFixed(3)}, channel=${item.candidate.slackChannelId || 'unknown'}, updated=${item.candidate.updatedAt}`
+          );
+        }
+
+        // Pick best candidate
+        if (scoredCandidates.length > 0) {
+          const bestCandidate = scoredCandidates[0];
+          const bestScore = bestCandidate.score;
+          const bestTicket = bestCandidate.ticket;
+
+          // Decision rules for CCR:
+          // - Merge if score >= SCORE_THRESHOLD (0.75) OR
+          // - Merge if overlapCount >= 2 AND distance <= 0.45 AND score >= 0.65
+          const shouldMerge =
+            bestScore >= SCORE_THRESHOLD ||
+            (bestCandidate.overlapCount >= 2 && bestCandidate.distance <= 0.45 && bestScore >= 0.65);
+
+          if (shouldMerge) {
+            console.log(
+              `[Group] CCR decision: MERGED, bestCandidate=${bestCandidate.candidate.ticketId}, bestScore=${bestScore.toFixed(3)}`
+            );
+            await upsertMessage({
+              ...messageData,
+              ticket_id: bestTicket.id,
+              embedding,
+            });
+            await refreshTicketSummary(bestTicket.id, classification, messageData);
+            emitTicketUpdated(bestTicket.id);
+            return bestTicket.id;
+          } else if (isCCRGrayZone(bestScore, SCORE_THRESHOLD, bestCandidate.distance, bestCandidate.overlapCount)) {
+            // Gray-zone LLM merge check
+            console.log('[Group] CCR score in gray-zone, performing LLM merge check...');
+            const ticketMessages = await getMessagesByTicketId(bestTicket.id);
+            const llmResult = await checkCCRLLMMerge({
+              candidateTicket: bestTicket,
+              candidateMessages: ticketMessages.map((m) => ({
+                text: m.text,
+                username: m.slack_username,
+              })),
+              incomingMessage: messageData,
+              incomingClassification: classification,
+            });
+
+            console.log(
+              `[Group] CCR LLM check: should_merge=${llmResult.should_merge}, confidence=${llmResult.confidence.toFixed(3)}, reason="${llmResult.reason}"`
+            );
+
+            if (llmResult.should_merge && llmResult.confidence >= 0.7) {
+              console.log(
+                `[Group] CCR LLM check approved merge, ticket=${bestTicket.id}`,
+                isFde ? '(FDE adding context)' : ''
+              );
+              await upsertMessage({
+                ...messageData,
+                ticket_id: bestTicket.id,
+                embedding,
+              });
+              await refreshTicketSummary(bestTicket.id, classification, messageData);
+              emitTicketUpdated(bestTicket.id);
+              return bestTicket.id;
+            } else {
+              console.log('[Group] CCR LLM check did not approve merge, proceeding to Step 4');
+            }
+          } else {
+            console.log(
+              `[Group] CCR decision: NEW_TICKET, bestCandidate=${bestCandidate.candidate.ticketId}, bestScore=${bestScore.toFixed(3)}`
+            );
+          }
+        }
+      }
+    } catch (error) {
+      console.error('[Group] Error in CCR Step 3.6:', error);
+      // Continue to Step 4 on error
     }
   }
 
@@ -756,6 +1213,11 @@ export async function groupMessage(
   // FDE messages cannot create new tickets, only add context to existing ones
   if (isFde) {
     console.log('[Group] ⚠️ FDE message cannot create new ticket - no existing ticket to attach to');
+    return null;
+  }
+
+  if (isContextOnly) {
+    console.log('[Group] Context-only message: no suitable ticket found, skipping (do not create new ticket)');
     return null;
   }
 
@@ -792,6 +1254,7 @@ export async function groupMessage(
     ...messageData,
     ticket_id: ticket.id,
     embedding,
+    is_context_only: isContextOnly,
   });
 
   if (message.ticket_id !== ticket.id) {
@@ -802,6 +1265,7 @@ export async function groupMessage(
     });
   }
   console.log('[Group] Attached creating message to ticket:', message.id, 'ticket_id:', message.ticket_id);
+  emitTicketUpdated(ticket.id);
 
   return ticket.id;
 }

@@ -18,7 +18,7 @@ export function DashboardContent({
   const [tickets, setTickets] = useState<Ticket[]>(initialTickets);
   const [error, setError] = useState<string | null>(initialError ?? null);
   const [loading, setLoading] = useState(false);
-  const { onTicketUpdated } = useSocket();
+  const { onTicketUpdated, onConnect } = useSocket();
 
   const fetchTickets = useCallback(async () => {
     try {
@@ -44,6 +44,12 @@ export function DashboardContent({
     const unsubscribe = onTicketUpdated(fetchTickets);
     return unsubscribe;
   }, [onTicketUpdated, fetchTickets]);
+
+  // Refetch when socket connects/reconnects so we don't miss updates that happened while disconnected
+  useEffect(() => {
+    const unsubscribe = onConnect(fetchTickets);
+    return unsubscribe;
+  }, [onConnect, fetchTickets]);
 
   // Refetch after delete so stats and list stay in sync
   const handleDeleteTicket = useCallback(

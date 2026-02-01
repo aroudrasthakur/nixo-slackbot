@@ -2,6 +2,8 @@ import OpenAI from 'openai';
 import { ClassificationResultSchema, type ClassificationResult } from '@nixo-slackbot/shared';
 import { classificationCache } from './cache';
 import { openaiLimiter } from './limiter';
+import { getCrossChannelContext, type CrossChannelContext } from '../db/messages';
+import { getOpenAIEmbedding } from '../db/client';
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -30,36 +32,62 @@ export interface ChannelContext {
 function buildUserPrompt(
   text: string,
   threadContext?: ThreadContext,
-  channelContext?: ChannelContext
+  channelContext?: ChannelContext,
+  crossChannelContext?: CrossChannelContext
 ): string {
+  let prompt = '';
+
   // Thread context takes priority (direct reply in a thread)
   if (threadContext && threadContext.messages.length > 0) {
-    return `THREAD CONTEXT (this message is a reply in a thread):\n${threadContext.messages
+    prompt += `THREAD CONTEXT (this message is a reply in a thread):\n${threadContext.messages
       .map((m, i) => `[${i + 1}] ${m.text}`)
-      .join('\n')}\n\nCURRENT MESSAGE TO CLASSIFY:\n${text}`;
+      .join('\n')}\n\n`;
+  } else if (channelContext && channelContext.messages.length > 0) {
+    // Channel context for non-thread messages
+    prompt += `CHANNEL CONTEXT (recent messages in the same channel, NOT a thread - look for indirect references):\n${channelContext.messages
+      .map((m, i) => `[${i + 1}] ${m.text}`)
+      .join('\n')}\n\n`;
   }
 
-  // Channel context for non-thread messages
-  if (channelContext && channelContext.messages.length > 0) {
-    return `CHANNEL CONTEXT (recent messages in the same channel, NOT a thread - look for indirect references):\n${channelContext.messages
-      .map((m, i) => `[${i + 1}] ${m.text}`)
-      .join('\n')}\n\nCURRENT MESSAGE TO CLASSIFY:\n${text}`;
+  // Add cross-channel context (DB RAG) if available
+  if (crossChannelContext) {
+    if (crossChannelContext.tickets.length > 0 || crossChannelContext.messages.length > 0) {
+      prompt += 'RELATED CONTEXT FROM OTHER CHANNELS:\n';
+      if (crossChannelContext.tickets.length > 0) {
+        prompt += 'Similar tickets:\n';
+        for (const ticket of crossChannelContext.tickets) {
+          prompt += `- [${ticket.title}] ${ticket.summary || 'No summary'}\n`;
+          if (ticket.messages && ticket.messages.length > 0) {
+            prompt += `  Recent messages: ${ticket.messages.map(m => `${m.username || 'User'}: ${m.text}`).join('; ')}\n`;
+          }
+        }
+      }
+      if (crossChannelContext.messages.length > 0) {
+        prompt += 'Similar messages:\n';
+        for (const msg of crossChannelContext.messages) {
+          prompt += `- [${msg.ticket_title}] ${msg.username || 'User'}: ${msg.text}\n`;
+        }
+      }
+      prompt += '\n';
+    }
   }
 
-  // No context available
-  return text;
+  prompt += `CURRENT MESSAGE TO CLASSIFY:\n${text}`;
+  return prompt;
 }
 
 export async function classifyMessage(
   text: string,
   normalizedText: string,
   threadContext?: ThreadContext,
-  channelContext?: ChannelContext
+  channelContext?: ChannelContext,
+  crossChannelContext?: CrossChannelContext
 ): Promise<ClassificationResult> {
   // Check cache first (but only if no context, since context changes relevance)
   const hasContext =
     (threadContext && threadContext.messages.length > 0) ||
-    (channelContext && channelContext.messages.length > 0);
+    (channelContext && channelContext.messages.length > 0) ||
+    (crossChannelContext && (crossChannelContext.tickets.length > 0 || crossChannelContext.messages.length > 0));
   if (!hasContext) {
     const cached = classificationCache.get(normalizedText);
     if (cached) {
@@ -129,7 +157,7 @@ Return a structured response with:
           },
           {
             role: 'user',
-            content: buildUserPrompt(text, threadContext, channelContext),
+            content: buildUserPrompt(text, threadContext, channelContext, crossChannelContext),
           },
         ],
         response_format: {

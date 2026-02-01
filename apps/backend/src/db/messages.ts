@@ -14,6 +14,8 @@ export interface MessageInsert {
   permalink?: string | null;
   /** Optional embedding for semantic matching; stored for future similarity search */
   embedding?: number[] | null;
+  /** If true, message is context-only (is_relevant=false but attached to ticket) */
+  is_context_only?: boolean;
 }
 
 export async function upsertMessage(data: MessageInsert): Promise<Message> {
@@ -29,6 +31,7 @@ export async function upsertMessage(data: MessageInsert): Promise<Message> {
     slack_event_id: data.slack_event_id ?? null,
     permalink: data.permalink ?? null,
     embedding: data.embedding ?? null,
+    is_context_only: data.is_context_only ?? false,
   };
 
   const { data: message, error } = await supabase
@@ -167,5 +170,109 @@ export async function findSimilarMessagesCandidates(
     category: row.category,
     updatedAt: row.updated_at,
     canonicalKey: row.canonical_key,
+    slackChannelId: row.slack_channel_id || undefined,
   }));
+}
+
+/**
+ * Find cross-channel message candidates for CCR.
+ * Returns top K messages from last CROSS_CHANNEL_DAYS, grouped by ticket_id.
+ */
+export async function findCrossChannelMessageCandidates(
+  embedding: number[],
+  daysBack: number = 14,
+  limit: number = 25
+): Promise<TicketCandidate[]> {
+  const { data, error } = await supabase.rpc('find_cross_channel_message_candidates', {
+    query_embedding: embedding,
+    days_back: daysBack,
+    ticket_status_filter: 'open',
+    result_limit: limit,
+  });
+
+  if (error) {
+    throw new Error(`Failed to find cross-channel message candidates: ${error.message}`);
+  }
+
+  if (!data || data.length === 0) {
+    return [];
+  }
+
+  return data.map((row: any) => ({
+    ticketId: row.ticket_id,
+    distance: row.distance,
+    category: row.category,
+    updatedAt: row.updated_at,
+    canonicalKey: row.canonical_key,
+    slackChannelId: row.slack_channel_id || undefined,
+  }));
+}
+
+export interface CrossChannelContextTicket {
+  ticket_id: string;
+  title: string;
+  category: string;
+  summary: any;
+  distance: number;
+  messages: Array<{ text: string; username: string | null }>;
+}
+
+export interface CrossChannelContextMessage {
+  ticket_id: string;
+  text: string;
+  username: string | null;
+  distance: number;
+  ticket_title: string;
+}
+
+export interface CrossChannelContext {
+  tickets: CrossChannelContextTicket[];
+  messages: CrossChannelContextMessage[];
+}
+
+/**
+ * Get cross-channel context for classification (DB RAG).
+ * Returns top similar tickets and messages from other channels.
+ */
+export async function getCrossChannelContext(
+  embedding: number[],
+  daysBack: number = 14
+): Promise<CrossChannelContext> {
+  const { data, error } = await supabase.rpc('get_ticket_context_for_classification', {
+    query_embedding: embedding,
+    days_back: daysBack,
+    ticket_limit: 3,
+    message_limit: 5,
+  });
+
+  if (error) {
+    console.error('[DB] Error fetching cross-channel context:', error);
+    return { tickets: [], messages: [] };
+  }
+
+  if (!data) {
+    return { tickets: [], messages: [] };
+  }
+
+  const tickets = (data.tickets || []).map((t: any) => ({
+    ticket_id: t.ticket_id,
+    title: t.title,
+    category: t.category,
+    summary: t.summary,
+    distance: t.distance,
+    messages: (t.messages || []).map((m: any) => ({
+      text: m.text,
+      username: m.username,
+    })),
+  }));
+
+  const messages = (data.messages || []).map((m: any) => ({
+    ticket_id: m.ticket_id,
+    text: m.text,
+    username: m.username,
+    distance: m.distance,
+    ticket_title: m.ticket_title,
+  }));
+
+  return { tickets, messages };
 }
