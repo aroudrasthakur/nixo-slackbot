@@ -157,6 +157,112 @@ Expected bot behavior:
 
 ---
 
+## Flow 4: Cross-Ticket Drift and Scoring Confusion
+
+This flow intentionally mixes topics across channels and threads to stress-test grouping logic.
+
+### Channel: #acme-support
+
+**Customer (Jordan):**  
+We’re seeing slow page loads on the dashboard today. Feels worse than usual.
+
+**Expected bot behavior:**
+
+- Classified as support issue
+- New ticket created
+- Title example: _Dashboard performance degradation_
+
+**Customer (Nathan):**  
+Is this related to the login bug from earlier?
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- Appended to _Dashboard performance degradation_
+- Should not merge with login bug ticket
+
+---
+
+### Channel: #acme-bugs
+
+**Customer (Nathan):**  
+Also noticing that webhooks are delayed now, not just failing. Some come through after 2–3 minutes.
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- Appended to _Webhooks failing with 401_
+- Not merged with performance ticket
+
+**Customer (Jordan):**  
+Yeah our dashboard is slow AND webhooks are weird today.
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- References multiple issues
+- Appended to the highest-confidence existing ticket
+- No new ticket created
+
+---
+
+### Channel: #acme-support (thread)
+
+**Customer (Jordan) in thread:**  
+Actually the slowness might just be on mobile. Desktop seems fine.
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- Appended to _Dashboard performance degradation_
+
+**Customer (Nathan) in same thread:**  
+Mobile Safari again… feels cursed 😅
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- Remains in performance ticket
+- Emoji does not cause it to be ignored
+
+---
+
+### Channel: #acme-feature-requests
+
+**Customer (Nathan):**  
+While we’re here, can we get a webhook retry dashboard? Hard to debug these failures.
+
+**Expected bot behavior:**
+
+- Classified as feature request
+- New ticket created
+- Title example: _Webhook retry visibility dashboard_
+
+**Customer (Jordan):**  
+This would’ve helped with the 401 issue earlier.
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- Appended to feature request ticket
+- Not merged with webhook bug
+
+---
+
+### Channel: #acme-bugs (late repeat)
+
+**Customer (Nathan):**  
+Login on mobile still broken btw.
+
+**Expected bot behavior:**
+
+- Detected as relevant
+- De-duplicated
+- Appended to _Login broken on mobile Safari_
+- No new ticket created
+
+---
+
 ## Expected Dashboard State After Demo
 
 You should see exactly four tickets:
@@ -176,9 +282,6 @@ You should see exactly four tickets:
 
    - Messages from #acme-support thread and #acme-bugs
    - Demonstrates de-duplication
-
-4. (Optional) SSO setup question
-   - Only if you choose to classify onboarding questions as relevant
 
 Ignored:
 
