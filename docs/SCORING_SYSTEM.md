@@ -206,13 +206,88 @@ Signals are **normalized** with a synonym map (e.g. "rbac", "permission", "autho
 
 So **CCR relies more on overlap** to justify cross-channel merges.
 
+### 7.1 Color Tokens and Object Requirements
+
+Color tokens alone are not treated as primary overlap evidence unless paired with an object token. This prevents unrelated style requests across different UI components from being grouped together.
+
+- "make the button blue" and "make the dashboard blue" have different `intent_object` values (button vs dashboard)
+- Canonical key generation for `style_change` intents requires an object token
+- Example allowed: `"button|style"` or `"dashboard|style"`
+- Example blocked: `"blue|style"` alone (no object)
+
 ---
 
-## 8. Guardrails (Pre-Score or Post-Score Blocks)
+## 8. Redundancy Detection (Same Meaning Collapse)
+
+**Overview:**  
+Redundancy detection runs **after** a ticket is chosen (post-merge step). A message can be relevant and still be hidden if it repeats the same intent as a prior message in the ticket.
+
+**When it runs:**  
+After Steps 1-3.6 or Step 4 (create) determine the target ticket, but before `upsertMessage` stores the message.
+
+**Fields:**
+
+- `is_redundant`: boolean flag indicating if message is redundant
+- `redundant_of_message_id`: UUID reference to the first message that established this intent
+- `intent_key`: composite key `${intent_action}|${intent_object}|${intent_value ?? "*"}`
+- `intent_action`: style_change, access_control, add_feature, bug, etc.
+- `intent_object`: REQUIRED primary object (button, dashboard, navbar, etc.)
+- `intent_value`: color (for style_change), role (for access_control), etc.
+
+**Intent Key Format:**  
+Format: `${intent_action}|${intent_object}|${intent_value ?? "*"}`
+
+**Critical Rule:** `intent_object` is **mandatory**. If missing, `intent_key` is `null` and redundancy check is skipped. This ensures color words alone cannot group messages across different UI components.
+
+**Examples:**
+
+- "make the button blue" → `intent_key = "style_change|button|blue"`
+- "ensure the button is blue" → `intent_key = "style_change|button|blue"` → **redundant** (same intent_key)
+- "make the dashboard blue" → `intent_key = "style_change|dashboard|blue"` → **NOT redundant** (different intent_object)
+
+**Redundancy Detection Logic:**
+
+1. Compute `intent_key` for incoming message using `computeIntentFingerprint`.
+2. Fetch last `REDUNDANT_LOOKBACK` (default 20) visible messages (`is_redundant=false`) for the ticket, ordered by `created_at DESC`.
+3. For each prior message:
+
+- If `intent_key` matches AND
+- Semantic distance ≤ `REDUNDANT_DISTANCE_THRESHOLD` (default 0.18) AND
+- No new information added (see override rules)
+- Then mark incoming as redundant.
+
+**"Adds new info" Override:**  
+Even if `intent_key` matches, treat as **NOT redundant** if:
+
+- Contains new platform (ios/android/web) not in ticket signals
+- Contains error codes/endpoints not already present
+- Introduces urgency/deadline words (asap, tonight, critical)
+- Changes `intent_value` (e.g., blue → red)
+
+**When redundant:**
+
+- Message stored with `is_redundant=true`, `redundant_of_message_id`, `is_context_only=true`
+- Summary refresh **skipped** (does not trigger `refreshTicketSummary`)
+- UI hides by default (can be toggled to show)
+
+**When not redundant:**
+
+- Message stored normally with `is_redundant=false`
+- Summary refresh proceeds as usual
+- Message visible in UI
+
+**Configuration:**
+
+- `REDUNDANT_DISTANCE_THRESHOLD` (default 0.18): maximum embedding distance for redundancy
+- `REDUNDANT_LOOKBACK` (default 20): number of prior messages to check
+
+---
+
+## 9. Guardrails (Pre-Score or Post-Score Blocks)
 
 Guardrails can **allow** or **block** a merge regardless of the numeric score.
 
-### 8.1 Step 3.5: `applyGuardrails`
+### 9.1 Step 3.5: `applyGuardrails`
 
 **Allow (strong evidence overrides category):**
 
@@ -227,7 +302,7 @@ Guardrails can **allow** or **block** a merge regardless of the numeric score.
 
 So: with **no** structural evidence (no thread, no overlap, or not same-channel+recent), **incompatible** category + **high distance** → block. With strong evidence (thread, overlap, or same-channel+recent+close), merge is still allowed.
 
-### 8.2 Step 3.5: Topic Guard (After Score)
+### 9.2 Step 3.5: Topic Guard (After Score)
 
 Even if guardrails pass and score ≥ 0.65:
 
@@ -235,7 +310,7 @@ Even if guardrails pass and score ≥ 0.65:
 
 So: high distance + **zero** overlap is treated as "different topic" and overrides the score.
 
-### 8.3 Step 3.6: `applyCCRGuardrails`
+### 9.3 Step 3.6: `applyCCRGuardrails`
 
 **Rare tokens:**  
 Fixed set (e.g. budget, csv, export, rbac, admin, superadmin, 403, 401, 500, invoice, oauth, sso, dashboard, analytics, pdf, report). Used to see if message and ticket share at least one **specific** term.
@@ -256,11 +331,11 @@ So CCR guardrails **block** only when evidence is weak (no overlap, no rare toke
 
 ---
 
-## 9. Gray-Zone and LLM Checks
+## 10. Gray-Zone and LLM Checks
 
 When the score is **near** the threshold (or distance in a "gray" band), an LLM is asked "same underlying issue?" to reduce borderline mistakes.
 
-### 9.1 Step 3.5: `isGrayZone`
+### 10.1 Step 3.5: `isGrayZone`
 
 Trigger **any** of:
 
@@ -270,7 +345,7 @@ Trigger **any** of:
 
 So: **close to threshold** or **distance in middle range + close to threshold** → LLM check. Different category widens the "close" band (0.08 vs 0.05).
 
-### 9.2 Step 3.6: `isCCRGrayZone`
+### 10.2 Step 3.6: `isCCRGrayZone`
 
 Trigger **either**:
 
@@ -279,7 +354,7 @@ Trigger **either**:
 
 So CCR uses a **fixed 0.08 band** below threshold and/or **distance band + at least one overlap** to trigger the LLM.
 
-### 9.3 LLM Decision
+### 10.3 LLM Decision
 
 - **Step 3.5:** `checkLLMMerge` — same-channel merge; prompt stresses "same underlying issue, not same broad topic".
 - **Step 3.6:** `checkCCRLLMMerge` — cross-channel; prompt stresses "more conservative", "clearly same issue across channels".
@@ -288,7 +363,7 @@ Merge only if LLM returns e.g. `should_merge === true` and **confidence ≥ 0.7*
 
 ---
 
-## 10. Decision Rules (How Score + Guardrails Are Used)
+## 11. Decision Rules (How Score + Guardrails Are Used)
 
 **Step 3.5 (recent channel):**
 
@@ -297,6 +372,7 @@ Merge only if LLM returns e.g. `should_merge === true` and **confidence ≥ 0.7*
 3. If score ≥ RECENT_CHANNEL_SCORE_THRESHOLD (0.65):
    - **If irrelevant:** merge only as context-only when score ≥ THREAD_CONTEXT_ONLY_MIN_SCORE **and** (overlapCount ≥ 1 **or** status-update **or** distance ≤ 0.30); otherwise **drop** (do not attach).
    - **If relevant:** merge (normal or context-only per options).
+   - 3a. Redundancy check: if redundant → store as `is_redundant=true`, skip summary refresh, hide in UI. Otherwise proceed normally.
 4. Else if gray-zone → LLM; if LLM says merge and confidence ≥ 0.7 → merge.
 5. Else → no merge (continue to 3.6 / 4).
 
@@ -315,9 +391,13 @@ So:
 - **3.5:** One candidate (recent ticket in channel); threshold 0.65; topic guard and guardrails can still block.
 - **3.6:** Many candidates; threshold 0.75 (or alternative rule for high overlap + moderate distance); CCR guardrails filter candidates; best candidate must pass threshold or LLM.
 
+**Step 4 (create):**
+
+- After creating ticket and inserting first message, redundancy check is skipped (no prior messages to compare).
+
 ---
 
-## 11. Design Summary and Tradeoffs
+## 12. Design Summary and Tradeoffs
 
 **Design choices:**
 
@@ -333,9 +413,10 @@ So:
 
 **Tradeoffs:**
 
-- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, gray-zone bands, RECENT_WINDOW_MINUTES. Raising thresholds → fewer merges.
+- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, REDUNDANT_DISTANCE_THRESHOLD, REDUNDANT_LOOKBACK, gray-zone bands, RECENT_WINDOW_MINUTES. Raising thresholds → fewer merges.
 - **Overlap + normalization:** Signal overlap uses normalized synonyms; CCR overlap has large impact (+0.20 for 2+). Noisy signals can increase merges/splits.
 - **Rare-token set:** Fixed list; add domain terms if needed for CCR.
 - **Recency:** 10 min (3.5) vs 24 h (3.6) in CCR is intentional.
+- **Redundancy:** Post-merge optimization; does not affect scoring or merge decisions. Redundant messages preserved for audit but hidden by default.
 
 Overall, the system is **multi-factor, threshold-based** with **evidence-based guardrails** (including **irrelevant filler block** for thread messages) and **LLM gray-zone** checks so merges stay aligned with "same underlying issue."

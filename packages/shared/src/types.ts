@@ -28,6 +28,8 @@ export interface Ticket {
   summary: TicketSummary | null;
   created_at: string;
   updated_at: string;
+  /** Number of messages in this ticket (included when listing tickets) */
+  message_count?: number;
 }
 
 export interface Message {
@@ -47,6 +49,18 @@ export interface Message {
   slack_channel_name?: string | null;
   /** Workspace/team display name, resolved from Slack when loading ticket */
   slack_workspace_name?: string | null;
+  /** True if this message repeats the same intent as a prior message in the ticket */
+  is_redundant?: boolean;
+  /** Reference to the first message that established this intent_key */
+  redundant_of_message_id?: string | null;
+  /** Composite key: intent_action|intent_object|intent_value. Null if intent_object missing. */
+  intent_key?: string | null;
+  /** Primary object/component (button, dashboard, etc.). Required for intent_key. */
+  intent_object?: string | null;
+  /** Action type: style_change, access_control, add_feature, bug, etc. */
+  intent_action?: string | null;
+  /** Value: color (for style_change), role (for access_control), etc. */
+  intent_value?: string | null;
 }
 
 export interface ClassificationResult {

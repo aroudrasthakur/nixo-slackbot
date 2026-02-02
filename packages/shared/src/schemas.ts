@@ -57,6 +57,12 @@ export const MessageSchema = z.object({
   created_at: z.string(),
   slack_channel_name: z.string().nullable().optional(),
   slack_workspace_name: z.string().nullable().optional(),
+  is_redundant: z.boolean().optional(),
+  redundant_of_message_id: z.string().uuid().nullable().optional(),
+  intent_key: z.string().nullable().optional(),
+  intent_object: z.string().nullable().optional(),
+  intent_action: z.string().nullable().optional(),
+  intent_value: z.string().nullable().optional(),
 });
 
 export const TicketWithMessagesSchema = TicketSchema.extend({

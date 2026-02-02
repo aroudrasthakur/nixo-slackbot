@@ -118,6 +118,7 @@ Set each variable:
 | **Frontend**                     |                                                                             |                             |
 | `NEXT_PUBLIC_SOCKET_URL`         | Backend URL for Socket.IO                                                   | `http://localhost:4000`     |
 | `NEXT_PUBLIC_API_URL`            | Backend URL for API                                                         | `http://localhost:4000`     |
+| `NEXT_PUBLIC_APP_ORIGIN`         | Web app origin (for server-side fetch of tickets, e.g. dashboard/tickets)   | `http://localhost:3000`     |
 
 _Note: Legacy variables like `SIMILARITY_THRESHOLD` are preserved for backward compatibility but superseded by score thresholds._
 
@@ -131,11 +132,12 @@ pnpm dev
 
 - **Backend** (Express + Socket.IO + Slack Bolt): http://localhost:4000
 - **Web App** (Landing Page): http://localhost:3000
-- **Dashboard** (Tickets): http://localhost:3000/dashboard
+- **Dashboard** (overview): http://localhost:3000/dashboard
+- **Tickets** (tickets-only list): http://localhost:3000/dashboard/tickets
 
-Open http://localhost:3000/dashboard for the tickets list. Post a relevant message in a channel where the bot is invited to create a ticket.
+Open **Dashboard** for an overview (stats cards + ticket list with search and filters). Open **Tickets** for a tickets-only view with taller cards (reporter, message count). Post a relevant message in a channel where the bot is invited to create a ticket.
 
-Note that /dashboard is protected and would need user Sign-Up/Login-in to access it.
+Note: `/dashboard` and `/dashboard/tickets` are protected and require Sign-up/Login to access.
 
 **Run apps individually (optional):**
 
@@ -146,9 +148,11 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 ### 7. Verify setup
 
 - **Health:** http://localhost:4000/health → `{"status":"ok"}`
-- **API:** http://localhost:4000/api/tickets → JSON array of tickets
+- **Backend API – list tickets:** `GET http://localhost:4000/api/tickets` (optional `?status=open|closed|resolved`) → JSON array of tickets, each including `message_count`
+- **Backend API – single ticket:** `GET http://localhost:4000/api/tickets/:id` → ticket with messages
 - **Slack:** Backend logs show "Slack Bolt app started"; sending a relevant message in Slack creates/updates a ticket
-- **Dashboard:** http://localhost:3000/dashboard shows the list; new/updated tickets appear in real time (Socket.IO)
+- **Dashboard:** http://localhost:3000/dashboard shows overview and ticket list; http://localhost:3000/dashboard/tickets shows the tickets-only view; new/updated tickets appear in real time (Socket.IO)
+- **Ticket detail:** Open a ticket from Dashboard or Tickets; the back arrow returns to the page you came from (`/dashboard` or `/dashboard/tickets` via `?from=dashboard` or `?from=tickets`)
 - **Test without Slack:**  
   `curl -X POST http://localhost:4000/dev/ingest -H "Content-Type: application/json" -d "{\"channel\":\"C1234567890\",\"ts\":\"1234567890.123456\",\"user\":\"U9876543210\",\"text\":\"I found a bug in the API\"}"`  
   A new ticket should appear on the dashboard.
@@ -163,7 +167,7 @@ To demonstrate the system in 1-2 minutes:
 2. **Post a vague follow-up** ("I can’t see it anywhere on the settings page") -> **Attaches to previous ticket** (using thread or channel context).
 3. **Post a status update** ("Dev team is looking into this") -> **Attaches as Context-Only** (updates ticket history but doesn't trigger new alerts).
 4. **Post "Thanks!"** -> **Ignored** (Heuristic filter drops it, or attaches silently).
-5. **Show Dashboard**: Observe live updates at `http://localhost:3000/dashboard` without refreshing.
+5. **Show Dashboard / Tickets**: Observe live updates at `http://localhost:3000/dashboard` or `http://localhost:3000/dashboard/tickets` without refreshing.
 
 ---
 
@@ -175,6 +179,37 @@ To demonstrate the system in 1-2 minutes:
 2. **Context-aware OpenAI classification:** Classifies messages into `bug_report`, `support_question`, `feature_request`, etc.
    - The system attempts to attach messages to existing tickets (Steps 1–3.6); only messages with `is_relevant: true` create a _new_ ticket (Step 4).
    - Irrelevant messages may attach as **context-only** only if they meet score and evidence rules (see [Scoring system](docs/SCORING_SYSTEM.md)); pure filler in a thread can be blocked even when in the same thread.
+
+### Relevance and Redundancy
+
+**Definition of "Relevant to FDEs":**
+
+- Actionable requests, bug reports, support questions, product questions
+- Clarifications that change scope or add signals
+- Excludes filler, greetings, pure acknowledgments
+
+**Redundancy Behavior:**
+
+Messages with the same `intent_key` are stored but hidden by default in the ticket timeline. Redundant messages are preserved for audit but do not trigger summary refreshes.
+
+Examples:
+
+- "make the button blue" vs "ensure the button is blue" → redundant (same `intent_key`)
+- "make the dashboard blue" is NOT redundant with button request (different `intent_object`)
+
+**Intent Key Format:**
+
+Format: `${intent_action}|${intent_object}|${intent_value}`
+
+- `intent_object` is required to prevent color-only grouping
+- Ensures "button blue" and "dashboard blue" remain distinct
+- Color tokens alone cannot group messages across different UI components
+
+**UI Behavior:**
+
+- Redundant messages are hidden by default in the ticket detail view
+- A toggle allows viewing redundant confirmations when needed
+- Redundant messages appear with reduced opacity when shown
 
 ### Grouping Algorithm (Step-by-Step Message Matching)
 
@@ -211,15 +246,39 @@ When a new Slack message arrives, it goes through a multi-step matching process.
 
 ## Dashboard Features
 
-### Ticket List
+### Pages and routes
 
-- **Full-width search bar** with instant filtering.
-- **Filters panel**: Date, Category, Priority, Status.
-- **Real-time updates**: Socket.IO pushes updates instantly.
+| Route                | Description                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/dashboard`         | **Dashboard** – Overview with stats cards and a ticket list (compact cards). Same search bar and filters (Date, Category, Priority, Status). Dynamic section title based on active filters. |
+| `/dashboard/tickets` | **Tickets** – Tickets-only view with the same search bar and filters. Taller ticket cards showing **Reported by**, **Messages** count, and reporter icon.                                   |
+| `/tickets/[id]`      | **Ticket detail** – Single ticket with message timeline. Back arrow returns to Dashboard or Tickets depending on where the ticket was opened (`?from=dashboard` or `?from=tickets`).        |
+
+### Ticket list (Dashboard and Tickets tab)
+
+- **Search bar** – Full-width search with the same design on both Dashboard and Tickets.
+- **Filters** – Date, Category, Priority, Status (custom dropdowns; overlay when open). Active filter count shown on the Filters button.
+- **Real-time updates** – Socket.IO pushes new/updated tickets without refresh.
+- **No loading indicator** – Initial load and refetches do not show a "Loading..." message next to the tickets.
 
 ### Sidebar
 
-- Navigation and User Profile.
+- **Dashboard** – Overview (stats + tickets).
+- **Tickets** – Tickets-only list.
+- **Profile** – User profile (and Sign out in the user menu at the bottom).
+
+### API (backend and web proxy)
+
+**Backend** (http://localhost:4000):
+
+| Method | Path               | Description                                                                                            |
+| ------ | ------------------ | ------------------------------------------------------------------------------------------------------ |
+| GET    | `/api/tickets`     | List tickets (optional `?status=open`, `closed`, or `resolved`). Each ticket includes `message_count`. |
+| GET    | `/api/tickets/:id` | Single ticket with messages (channel/workspace names resolved when available).                         |
+| PATCH  | `/api/tickets/:id` | Update ticket (e.g. body `{ "status": "resolved" }`).                                                  |
+| DELETE | `/api/tickets/:id` | Delete a ticket.                                                                                       |
+
+**Web app** (Next.js proxies to backend): `GET /api/tickets`, `GET /api/tickets/[id]`, `DELETE /api/tickets/[id]`.
 
 ---
 
@@ -227,7 +286,7 @@ When a new Slack message arrives, it goes through a multi-step matching process.
 
 - **Bot not receiving events**: Check Socket Mode and `message.channels` scope.
 - **Missing scopes**: Reinstall app after adding `channels:history`.
-- **Dashboard blank**: Ensure you are at `/dashboard` and backend is running.
+- **Dashboard blank**: Ensure you are at `/dashboard` or `/dashboard/tickets` and the backend is running.
 - **Database errors**: Check `SUPABASE_URL` and run migrations in order.
 
 ---

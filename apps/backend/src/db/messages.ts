@@ -17,6 +17,18 @@ export interface MessageInsert {
   embedding?: number[] | null;
   /** If true, message is context-only (is_relevant=false but attached to ticket) */
   is_context_only?: boolean;
+  /** True if this message repeats the same intent as a prior message in the ticket */
+  is_redundant?: boolean;
+  /** Reference to the first message that established this intent_key */
+  redundant_of_message_id?: string | null;
+  /** Composite key: intent_action|intent_object|intent_value. Null if intent_object missing. */
+  intent_key?: string | null;
+  /** Primary object/component (button, dashboard, etc.). Required for intent_key. */
+  intent_object?: string | null;
+  /** Action type: style_change, access_control, add_feature, bug, etc. */
+  intent_action?: string | null;
+  /** Value: color (for style_change), role (for access_control), etc. */
+  intent_value?: string | null;
 }
 
 export async function upsertMessage(data: MessageInsert): Promise<Message> {
@@ -60,6 +72,50 @@ export async function getMessagesByTicketId(ticketId: string): Promise<Message[]
 
   if (error) {
     throw new Error(`Failed to get messages: ${error.message}`);
+  }
+
+  return (data || []) as Message[];
+}
+
+/** Get message counts per ticket for a list of ticket IDs. */
+export async function getMessageCountsByTicketIds(
+  ticketIds: string[]
+): Promise<Map<string, number>> {
+  if (ticketIds.length === 0) return new Map();
+
+  const { data, error } = await supabase
+    .from('messages')
+    .select('ticket_id')
+    .in('ticket_id', ticketIds);
+
+  if (error) {
+    throw new Error(`Failed to get message counts: ${error.message}`);
+  }
+
+  const counts = new Map<string, number>();
+  for (const id of ticketIds) counts.set(id, 0);
+  for (const row of data || []) {
+    const tid = (row as { ticket_id: string }).ticket_id;
+    counts.set(tid, (counts.get(tid) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * Get recent visible (non-redundant) messages for a ticket, ordered by created_at DESC.
+ * Used for redundancy detection to check if incoming message repeats prior intent.
+ */
+export async function getRecentVisibleMessages(ticketId: string, limit: number): Promise<Message[]> {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('ticket_id', ticketId)
+    .eq('is_redundant', false)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) {
+    throw new Error(`Failed to get recent visible messages: ${error.message}`);
   }
 
   return (data || []) as Message[];

@@ -1,6 +1,6 @@
 import { supabase } from './client';
 import type { Ticket, TicketWithMessages, TicketStatus, TicketSummary } from '@nixo-slackbot/shared';
-import { getMessagesByTicketId } from './messages';
+import { getMessagesByTicketId, getMessageCountsByTicketIds } from './messages';
 
 /**
  * Parse a pgvector embedding returned by Supabase.
@@ -332,7 +332,10 @@ export async function getTickets(status?: TicketStatus): Promise<Ticket[]> {
     throw new Error(`Failed to get tickets: ${error.message}`);
   }
 
-  return (data || []).map((row) => normalizeTicket(row as Record<string, unknown>));
+  const tickets = (data || []).map((row) => normalizeTicket(row as Record<string, unknown>));
+  const ticketIds = tickets.map((t) => t.id);
+  const counts = await getMessageCountsByTicketIds(ticketIds);
+  return tickets.map((t) => ({ ...t, message_count: counts.get(t.id) ?? 0 }));
 }
 
 /**

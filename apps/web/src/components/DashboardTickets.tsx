@@ -1,8 +1,14 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
-import type { Ticket, TicketStatus, TicketCategory } from "@nixo-slackbot/shared";
+import React, { useState, useMemo, useEffect } from "react";
+import type {
+  Ticket,
+  TicketStatus,
+  TicketCategory,
+} from "@nixo-slackbot/shared";
 import { TicketCard } from "./TicketCard";
+import { TicketCardTall } from "./TicketCardTall";
+import { CustomSelect, type SelectOption } from "./CustomSelect";
 
 type DateFilter = "all" | "7d" | "30d" | "90d";
 type CategoryFilter = TicketCategory | "all";
@@ -13,12 +19,18 @@ interface DashboardTicketsProps {
   tickets: Ticket[];
   loading?: boolean;
   onDeleteTicket: (ticketId: string) => void;
+  /** "tall" for Tickets tab: taller cards with Reported by, Messages, reporter icon */
+  cardVariant?: "default" | "tall";
+  /** Override section title (e.g. "Tickets" on the Tickets tab) */
+  title?: string;
 }
 
 export function DashboardTickets({
   tickets,
   loading = false,
   onDeleteTicket,
+  cardVariant = "default",
+  title: titleProp,
 }: DashboardTicketsProps) {
   const [search, setSearch] = useState("");
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -51,9 +63,7 @@ export function DashboardTickets({
           ? 30 * 24 * 60 * 60 * 1000
           : 90 * 24 * 60 * 60 * 1000;
       const cutoff = now - ms;
-      result = result.filter(
-        (t) => new Date(t.updated_at).getTime() >= cutoff
-      );
+      result = result.filter((t) => new Date(t.updated_at).getTime() >= cutoff);
     }
 
     // Category
@@ -97,20 +107,90 @@ export function DashboardTickets({
     (priorityFilter !== "all" ? 1 : 0) +
     (statusFilter !== "all" ? 1 : 0);
 
-  const selectStyle: React.CSSProperties = {
-    flex: 1,
-    minWidth: "140px",
-    padding: "10px 12px",
-    border: "1px solid #dddddd",
-    borderRadius: "6px",
-    fontSize: "14px",
-    color: "#1d1c1d",
-    backgroundColor: "#fff",
-    cursor: "pointer",
-  };
+  // Dynamic title from applied filters (status first, then category, then priority)
+  const titleLabel = useMemo(() => {
+    const parts: string[] = [];
+    if (statusFilter !== "all") {
+      parts.push(statusFilter === "open" ? "Open" : "Resolved");
+    }
+    if (categoryFilter !== "all") {
+      const label =
+        categoryFilter === "bug_report"
+          ? "Bug Report"
+          : categoryFilter === "support_question"
+          ? "Support Question"
+          : categoryFilter === "feature_request"
+          ? "Feature Request"
+          : categoryFilter === "product_question"
+          ? "Product Question"
+          : categoryFilter;
+      parts.push(label);
+    }
+    if (priorityFilter !== "all") {
+      parts.push(
+        priorityFilter.charAt(0).toUpperCase() + priorityFilter.slice(1)
+      );
+    }
+    const base = parts.length ? parts.join(" ") + " Tickets" : "All Tickets";
+    const dateSuffix =
+      dateFilter !== "all"
+        ? dateFilter === "7d"
+          ? " (Last 7 days)"
+          : dateFilter === "30d"
+          ? " (Last 30 days)"
+          : " (Last 90 days)"
+        : "";
+    const searchSuffix =
+      search.trim() !== "" ? ` matching "${search.trim()}"` : "";
+    return `${base}${dateSuffix}${searchSuffix}`;
+  }, [categoryFilter, statusFilter, priorityFilter, dateFilter, search]);
+
+  const sectionTitle = titleProp ?? titleLabel;
+
+  // Options for custom dropdowns
+  const dateOptions: SelectOption[] = [
+    { value: "all", label: "All time" },
+    { value: "7d", label: "Last 7 days" },
+    { value: "30d", label: "Last 30 days" },
+    { value: "90d", label: "Last 90 days" },
+  ];
+
+  const categoryOptions: SelectOption[] = [
+    { value: "all", label: "All categories" },
+    { value: "bug_report", label: "Bug report" },
+    { value: "support_question", label: "Support question" },
+    { value: "feature_request", label: "Feature request" },
+    { value: "product_question", label: "Product question" },
+  ];
+
+  const priorityOptions: SelectOption[] = [
+    { value: "all", label: "All priorities" },
+    { value: "critical", label: "Critical" },
+    { value: "high", label: "High" },
+    { value: "medium", label: "Medium" },
+    { value: "low", label: "Low" },
+  ];
+
+  const statusOptions: SelectOption[] = [
+    { value: "all", label: "All statuses" },
+    { value: "open", label: "Open" },
+    { value: "resolved", label: "Resolved" },
+  ];
 
   return (
     <div>
+      {/* Section title (dynamic from filters or override e.g. "Tickets") */}
+      <h2
+        style={{
+          fontSize: "16px",
+          fontWeight: 600,
+          color: "#1d1c1d",
+          margin: "0 0 16px 0",
+        }}
+      >
+        {sectionTitle}
+      </h2>
+
       {/* Full-width search bar + Filters toggle */}
       <div
         style={{
@@ -230,11 +310,12 @@ export function DashboardTickets({
         </button>
       </div>
 
-      {/* Filters section - full width with smooth animation */}
+      {/* Filters section - fixed size, dropdowns overlay on top via portal */}
       <div
         style={{
           overflow: "hidden",
-          transition: "max-height 0.3s ease, opacity 0.25s ease, margin 0.3s ease",
+          transition:
+            "max-height 0.3s ease, opacity 0.25s ease, margin 0.3s ease",
           maxHeight: filtersOpen ? "200px" : "0",
           opacity: filtersOpen ? 1 : 0,
           marginBottom: filtersOpen ? "24px" : "0",
@@ -253,74 +334,94 @@ export function DashboardTickets({
           }}
         >
           {/* Date filter */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px", flex: 1, minWidth: "140px" }}>
-            <label style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}>Date</label>
-            <select
-              value={dateFilter}
-              onChange={(e) => setDateFilter(e.target.value as DateFilter)}
-              style={selectStyle}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px",
+              flex: 1,
+              minWidth: "140px",
+            }}
+          >
+            <label
+              style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}
             >
-              <option value="all">All time</option>
-              <option value="7d">Last 7 days</option>
-              <option value="30d">Last 30 days</option>
-              <option value="90d">Last 90 days</option>
-            </select>
+              Date
+            </label>
+            <CustomSelect
+              value={dateFilter}
+              options={dateOptions}
+              onChange={(val) => setDateFilter(val as DateFilter)}
+            />
           </div>
 
           {/* Category filter */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px", flex: 1, minWidth: "140px" }}>
-            <label style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}>Category</label>
-            <select
-              value={categoryFilter}
-              onChange={(e) => setCategoryFilter(e.target.value as CategoryFilter)}
-              style={selectStyle}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px",
+              flex: 1,
+              minWidth: "140px",
+            }}
+          >
+            <label
+              style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}
             >
-              <option value="all">All categories</option>
-              <option value="bug_report">Bug report</option>
-              <option value="support_question">Support question</option>
-              <option value="feature_request">Feature request</option>
-              <option value="product_question">Product question</option>
-            </select>
+              Category
+            </label>
+            <CustomSelect
+              value={categoryFilter}
+              options={categoryOptions}
+              onChange={(val) => setCategoryFilter(val as CategoryFilter)}
+            />
           </div>
 
           {/* Priority filter */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px", flex: 1, minWidth: "140px" }}>
-            <label style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}>Priority</label>
-            <select
-              value={priorityFilter}
-              onChange={(e) => setPriorityFilter(e.target.value as PriorityFilter)}
-              style={selectStyle}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px",
+              flex: 1,
+              minWidth: "140px",
+            }}
+          >
+            <label
+              style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}
             >
-              <option value="all">All priorities</option>
-              <option value="critical">Critical</option>
-              <option value="high">High</option>
-              <option value="medium">Medium</option>
-              <option value="low">Low</option>
-            </select>
+              Priority
+            </label>
+            <CustomSelect
+              value={priorityFilter}
+              options={priorityOptions}
+              onChange={(val) => setPriorityFilter(val as PriorityFilter)}
+            />
           </div>
 
           {/* Status filter */}
-          <div style={{ display: "flex", flexDirection: "column", gap: "6px", flex: 1, minWidth: "140px" }}>
-            <label style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}>Status</label>
-            <select
-              value={statusFilter}
-              onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-              style={selectStyle}
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "6px",
+              flex: 1,
+              minWidth: "140px",
+            }}
+          >
+            <label
+              style={{ fontSize: "12px", fontWeight: 600, color: "#616061" }}
             >
-              <option value="all">All statuses</option>
-              <option value="open">Open</option>
-              <option value="resolved">Resolved</option>
-            </select>
+              Status
+            </label>
+            <CustomSelect
+              value={statusFilter}
+              options={statusOptions}
+              onChange={(val) => setStatusFilter(val as StatusFilter)}
+            />
           </div>
         </div>
       </div>
-
-      {/* Loading indicator */}
-      {loading && (
-        <div style={{ marginBottom: "16px", color: "#616061", fontSize: "14px" }}>
-          Loading...
-        </div>
-      )}
 
       {/* Tickets grid */}
       {sortedTickets.length === 0 ? (
@@ -337,13 +438,25 @@ export function DashboardTickets({
             gap: "16px",
           }}
         >
-          {sortedTickets.map((ticket) => (
-            <TicketCard
-              key={ticket.id}
-              ticket={ticket}
-              onDelete={onDeleteTicket}
-            />
-          ))}
+          {sortedTickets.map((ticket) =>
+            cardVariant === "tall" ? (
+              <TicketCardTall
+                key={ticket.id}
+                ticket={ticket}
+                messageCount={
+                  (ticket as Ticket & { message_count?: number })
+                    .message_count ?? 0
+                }
+                onDelete={onDeleteTicket}
+              />
+            ) : (
+              <TicketCard
+                key={ticket.id}
+                ticket={ticket}
+                onDelete={onDeleteTicket}
+              />
+            )
+          )}
         </div>
       )}
     </div>

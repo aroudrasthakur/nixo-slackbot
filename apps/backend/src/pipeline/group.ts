@@ -12,8 +12,9 @@ import {
   findCrossChannelTicketCandidates,
   type TicketCandidate,
 } from '../db/tickets';
-import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates, findCrossChannelMessageCandidates } from '../db/messages';
-import { normalizeMessage, computeCanonicalKey } from './normalize';
+import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates, findCrossChannelMessageCandidates, getRecentVisibleMessages } from '../db/messages';
+import { normalizeMessage, computeCanonicalKey, computeIntentFingerprint, type IntentFingerprint } from './normalize';
+import type { MessageInsert } from '../db/messages';
 import { openaiLimiter } from './limiter';
 import { generateTicketSummary, generateTicketSummaryFromConversation, computeSummaryEmbedding } from './summarize';
 import { emitTicketUpdated } from '../socket/events';
@@ -40,6 +41,10 @@ const MATCH_TOPK_MESSAGES = parseInt(process.env.MATCH_TOPK_MESSAGES || '25', 10
 const SAME_THREAD_BONUS = parseFloat(process.env.SAME_THREAD_BONUS || '0.12');
 const THREAD_IRRELEVANT_BLOCK = process.env.THREAD_IRRELEVANT_BLOCK !== 'false'; // Default true
 const THREAD_CONTEXT_ONLY_MIN_SCORE = parseFloat(process.env.THREAD_CONTEXT_ONLY_MIN_SCORE || '0.60');
+
+// Redundancy detection configuration
+const REDUNDANT_DISTANCE_THRESHOLD = parseFloat(process.env.REDUNDANT_DISTANCE_THRESHOLD || '0.18');
+const REDUNDANT_LOOKBACK = parseInt(process.env.REDUNDANT_LOOKBACK || '20', 10);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -68,6 +73,176 @@ function cosineDistance(a: number[], b: number[]): number {
   const cosineSimilarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   // Cosine distance = 1 - cosine similarity
   return 1 - cosineSimilarity;
+}
+
+/**
+ * Insert message with redundancy check and summary refresh logic.
+ * Handles redundancy detection, message insertion, and conditional summary refresh.
+ */
+async function insertMessageWithRedundancyCheck(
+  ticketId: string,
+  messageData: Omit<MessageInsert, 'ticket_id'>,
+  embedding: number[] | null,
+  classification: ClassificationResult,
+  skipSummaryRefresh: boolean = false
+): Promise<void> {
+  // Compute intent fingerprint
+  const normalized = normalizeMessage(messageData.text);
+  const intentFingerprint = computeIntentFingerprint(messageData.text, normalized.signals);
+
+  // Check redundancy (only if we have an embedding and intent_key)
+  let isRedundant = false;
+  let redundantOfMessageId: string | null = null;
+
+  if (embedding && intentFingerprint.intent_key) {
+    const redundancyCheck = await checkRedundancy(
+      ticketId,
+      messageData,
+      embedding,
+      intentFingerprint,
+      classification
+    );
+    isRedundant = redundancyCheck.isRedundant;
+    redundantOfMessageId = redundancyCheck.redundantOfMessageId;
+  }
+
+  // Insert message with redundancy metadata
+  await upsertMessage({
+    ...messageData,
+    ticket_id: ticketId,
+    embedding: embedding ?? null,
+    is_redundant: isRedundant,
+    redundant_of_message_id: redundantOfMessageId,
+    intent_key: intentFingerprint.intent_key,
+    intent_object: intentFingerprint.intent_object,
+    intent_action: intentFingerprint.intent_action,
+    intent_value: intentFingerprint.intent_value,
+    // If redundant, also mark as context-only
+    is_context_only: messageData.is_context_only || isRedundant,
+  });
+
+  // Skip summary refresh if redundant or explicitly requested
+  if (!isRedundant && !skipSummaryRefresh) {
+    await refreshTicketSummary(ticketId, classification, messageData);
+  }
+}
+
+/**
+ * Check if incoming message is redundant (repeats same intent as prior message).
+ * Returns redundancy status and reference to original message if redundant.
+ */
+async function checkRedundancy(
+  ticketId: string,
+  incomingMessage: Omit<MessageInsert, 'ticket_id'>,
+  incomingEmbedding: number[],
+  intentFingerprint: IntentFingerprint,
+  classification: ClassificationResult
+): Promise<{ isRedundant: boolean; redundantOfMessageId: string | null }> {
+  // If no intent_key, cannot determine redundancy
+  if (!intentFingerprint.intent_key) {
+    return { isRedundant: false, redundantOfMessageId: null };
+  }
+
+  // Fetch recent visible messages
+  const recentMessages = await getRecentVisibleMessages(ticketId, REDUNDANT_LOOKBACK);
+  
+  if (recentMessages.length === 0) {
+    return { isRedundant: false, redundantOfMessageId: null };
+  }
+
+  // Check each prior message for matching intent_key
+  for (const priorMessage of recentMessages) {
+    const priorIntentKey = (priorMessage as any).intent_key;
+    if (!priorIntentKey || priorIntentKey !== intentFingerprint.intent_key) {
+      continue;
+    }
+
+    // Compute semantic distance if both have embeddings
+    const priorEmbedding = (priorMessage as any).embedding;
+    if (priorEmbedding && incomingEmbedding && 
+        Array.isArray(priorEmbedding) && Array.isArray(incomingEmbedding) &&
+        priorEmbedding.length === incomingEmbedding.length) {
+      const distance = cosineDistance(incomingEmbedding, priorEmbedding);
+      
+      if (distance > REDUNDANT_DISTANCE_THRESHOLD) {
+        continue; // Too different semantically
+      }
+
+      // Check "adds new info" override
+      const addsNewInfo = checkAddsNewInfo(
+        incomingMessage.text,
+        classification.signals,
+        intentFingerprint,
+        priorMessage
+      );
+
+      if (addsNewInfo) {
+        console.log(`[Group] Message not redundant: adds new information (intent_key=${intentFingerprint.intent_key})`);
+        continue;
+      }
+
+      // Mark as redundant
+      console.log(`[Group] Marking message as redundant: intent_key=${intentFingerprint.intent_key}, redundant_of=${priorMessage.id}, distance=${distance.toFixed(3)}`);
+      return { isRedundant: true, redundantOfMessageId: priorMessage.id };
+    }
+  }
+
+  return { isRedundant: false, redundantOfMessageId: null };
+}
+
+/**
+ * Check if message adds new information that prevents redundancy.
+ * Returns true if message should NOT be marked redundant despite matching intent_key.
+ */
+function checkAddsNewInfo(
+  incomingText: string,
+  incomingSignals: string[],
+  intentFingerprint: IntentFingerprint,
+  priorMessage: { text: string; intent_value?: string | null }
+): boolean {
+  const normalizedText = incomingText.toLowerCase();
+
+  // Check for new platform
+  const platformKeywords: string[] = ['ios', 'android', 'web', 'mobile', 'desktop'];
+  const hasNewPlatform = platformKeywords.some((platform: string) => 
+    normalizedText.includes(platform) && 
+    !priorMessage.text.toLowerCase().includes(platform)
+  );
+  if (hasNewPlatform) {
+    return true;
+  }
+
+  // Check for error codes/endpoints
+  const errorCodePattern = /\b(\d{3,4}|ERR[_\-]?\w+)\b/gi;
+  const incomingCodes: string[] = (incomingText.match(errorCodePattern) || []) as string[];
+  const priorCodes: string[] = (priorMessage.text.match(errorCodePattern) || []) as string[];
+  const hasNewErrorCode = incomingCodes.some((code: string) => !priorCodes.includes(code));
+  if (hasNewErrorCode) {
+    return true;
+  }
+
+  const endpointPattern = /\/(?:v\d+|api|auth)\/[\w\/\-]+/gi;
+  const incomingEndpoints: string[] = (incomingText.match(endpointPattern) || []) as string[];
+  const priorEndpoints: string[] = (priorMessage.text.match(endpointPattern) || []) as string[];
+  const hasNewEndpoint = incomingEndpoints.some((endpoint: string) => !priorEndpoints.includes(endpoint));
+  if (hasNewEndpoint) {
+    return true;
+  }
+
+  // Check for urgency/deadline words
+  const urgencyWords = ['asap', 'as soon as possible', 'tonight', 'today', 'urgent', 'critical', 'immediately', 'now'];
+  const hasUrgency = urgencyWords.some(word => normalizedText.includes(word));
+  if (hasUrgency) {
+    return true;
+  }
+
+  // Check if intent_value changed (e.g., blue -> red)
+  if (intentFingerprint.intent_value && priorMessage.intent_value &&
+      intentFingerprint.intent_value !== priorMessage.intent_value) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -920,27 +1095,39 @@ export async function groupMessage(
 
   // Step 2: Compute entity-based canonical_key and check for match (works globally across channels)
   console.log('[Group] Step 2: Computing entity-based canonical key...');
-  const normalized = normalizeMessage(messageData.text);
+  const normalizedStep2 = normalizeMessage(messageData.text);
   // Use entity-based canonical key from signals
-  const canonicalKey = computeCanonicalKey(normalized.signals) || 
-    normalized.normalizedText
+  const canonicalKey = computeCanonicalKey(normalizedStep2.signals, messageData.text) || 
+    normalizedStep2.normalizedText
       .substring(0, 50)
       .replace(/[^a-z0-9]/g, '_')
       .replace(/_+/g, '_')
       .replace(/^_|_$/g, '');
 
-  console.log('[Group] Canonical key:', canonicalKey, 'signals:', normalized.signals);
+  console.log('[Group] Canonical key:', canonicalKey, 'signals:', normalizedStep2.signals);
 
   if (canonicalKey) {
     const canonicalTicket = await findTicketByCanonicalKey(canonicalKey);
     if (canonicalTicket) {
       console.log('[Group] Found existing ticket via canonical key:', canonicalTicket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
-      await upsertMessage({
-        ...messageData,
-        ticket_id: canonicalTicket.id,
-        is_context_only: isContextOnly,
+      // Compute embedding for redundancy check (embedding will be computed in Step 3, but we need it here for redundancy check)
+      const signalsText = classification.signals.length > 0 
+        ? classification.signals.join(' ')
+        : '';
+      const textToEmbed = `${classification.category}: ${classification.short_title}\nSignals: ${signalsText}\nMessage: ${messageData.text}`.substring(0, 2000);
+      const embedding = await openaiLimiter(async () => {
+        const response = await openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: textToEmbed,
+        });
+        return response.data[0].embedding;
       });
-      await refreshTicketSummary(canonicalTicket.id, classification, messageData);
+      await insertMessageWithRedundancyCheck(
+        canonicalTicket.id,
+        { ...messageData, is_context_only: isContextOnly },
+        embedding,
+        classification
+      );
       emitTicketUpdated(canonicalTicket.id);
       return canonicalTicket.id;
     }
@@ -1116,25 +1303,23 @@ export async function groupMessage(
               }
               // Attach as context-only
               console.log('[Group] Recent ticket score meets threshold, merging message as context-only', ticket.id, isFde ? '(FDE adding context)' : '');
-              await upsertMessage({
-                ...messageData,
-                ticket_id: ticket.id,
+              await insertMessageWithRedundancyCheck(
+                ticket.id,
+                { ...messageData, is_context_only: true },
                 embedding,
-                is_context_only: true,
-              });
-              await refreshTicketSummary(ticket.id, classification, messageData);
+                classification
+              );
               emitTicketUpdated(ticket.id);
               return ticket.id;
             } else {
               // Relevant messages: attach normally
               console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
-              await upsertMessage({
-                ...messageData,
-                ticket_id: ticket.id,
+              await insertMessageWithRedundancyCheck(
+                ticket.id,
+                { ...messageData, is_context_only: isContextOnly },
                 embedding,
-                is_context_only: isContextOnly,
-              });
-              await refreshTicketSummary(ticket.id, classification, messageData);
+                classification
+              );
               emitTicketUpdated(ticket.id);
               return ticket.id;
             }
@@ -1155,12 +1340,12 @@ export async function groupMessage(
 
             if (llmResult.should_merge && llmResult.confidence >= 0.7) {
               console.log('[Group] LLM check approved merge for recent ticket', ticket.id, isFde ? '(FDE adding context)' : '');
-              await upsertMessage({
-                ...messageData,
-                ticket_id: ticket.id,
+              await insertMessageWithRedundancyCheck(
+                ticket.id,
+                { ...messageData, is_context_only: isContextOnly },
                 embedding,
-              });
-              await refreshTicketSummary(ticket.id, classification, messageData);
+                classification
+              );
               emitTicketUpdated(ticket.id);
               return ticket.id;
             } else {
@@ -1178,13 +1363,12 @@ export async function groupMessage(
         // If ticket has no embedding, skip semantic check (attach anyway for backward compatibility)
         // This handles tickets created before embeddings were added
         console.log('[Group] Found recent ticket in same channel (no embedding to compare):', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
-        await upsertMessage({
-          ...messageData,
-          ticket_id: ticket.id,
+        await insertMessageWithRedundancyCheck(
+          ticket.id,
+          { ...messageData, is_context_only: isContextOnly },
           embedding,
-          is_context_only: isContextOnly,
-        });
-        await refreshTicketSummary(ticket.id, classification, messageData);
+          classification
+        );
         emitTicketUpdated(ticket.id);
         return ticket.id;
       }
@@ -1465,11 +1649,20 @@ export async function groupMessage(
 
   console.log('[Group] Created new ticket:', ticket.id, 'title:', ticket.title);
 
+  // For new tickets, skip redundancy check (no prior messages to compare)
+  const normalized = normalizeMessage(messageData.text);
+  const intentFingerprint = computeIntentFingerprint(messageData.text, normalized.signals);
   const message = await upsertMessage({
     ...messageData,
     ticket_id: ticket.id,
     embedding,
     is_context_only: isContextOnly,
+    is_redundant: false,
+    redundant_of_message_id: null,
+    intent_key: intentFingerprint.intent_key,
+    intent_object: intentFingerprint.intent_object,
+    intent_action: intentFingerprint.intent_action,
+    intent_value: intentFingerprint.intent_value,
   });
 
   if (message.ticket_id !== ticket.id) {
