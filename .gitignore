@@ -18,14 +18,16 @@ dist/
 build/
 out/
 *.tsbuildinfo
+.vercel/
 
-# IDE
+# IDE / OS
 .vscode/
 .idea/
 *.swp
 *.swo
 *.swn
 .DS_Store
+Thumbs.db
 
 # Logs
 *.log
