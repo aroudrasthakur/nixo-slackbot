@@ -67,7 +67,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     try {
       await cognitoSignIn(params);
       await refreshUser();
-      router.push("/dashboard");
+      // Redirect is handled by the sign-in page so it can show a success message first
     } catch (error) {
       throw error;
     }

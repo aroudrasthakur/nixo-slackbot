@@ -1,9 +1,43 @@
 "use client";
 
-import React, { useState, useEffect, Suspense } from "react";
+import React, { useState, useEffect, useRef, Suspense } from "react";
 import Link from "next/link";
 import { useSearchParams, useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
+
+/** Maps Cognito/auth errors to user-friendly sign-in messages. */
+function getSignInErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as Error & { code?: string }).code;
+    const name = err.name;
+    const msg = err.message?.toLowerCase() ?? "";
+
+    // NotAuthorizedException = wrong email or password (Cognito doesn't distinguish)
+    if (
+      code === "NotAuthorizedException" ||
+      name === "NotAuthorizedException" ||
+      msg.includes("incorrect") ||
+      msg.includes("invalid") ||
+      msg.includes("not authorized")
+    ) {
+      return "Incorrect email or password. Please try again.";
+    }
+
+    // UserNotConfirmedException = email not verified
+    if (
+      code === "UserNotConfirmedException" ||
+      name === "UserNotConfirmedException" ||
+      msg.includes("confirm")
+    ) {
+      return err.message;
+    }
+
+    return err.message;
+  }
+  return "Failed to sign in. Please try again.";
+}
+
+const SIGNIN_ERROR_KEY = "nixo-signin-error";
 
 function SignInForm() {
   const searchParams = useSearchParams();
@@ -11,19 +45,31 @@ function SignInForm() {
   const { signIn, isAuthenticated, isLoading: isAuthLoading } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    if (typeof window !== "undefined") {
+      const stored = sessionStorage.getItem(SIGNIN_ERROR_KEY);
+      if (stored) {
+        sessionStorage.removeItem(SIGNIN_ERROR_KEY);
+        return stored;
+      }
+    }
+    return "";
+  });
   const [isLoading, setIsLoading] = useState(false);
   const [verifiedMessage, setVerifiedMessage] = useState(false);
+  const [successMessage, setSuccessMessage] = useState("");
+  const errorRef = useRef<HTMLDivElement>(null);
 
   const fromParam = searchParams.get("from");
   const requiresDashboardAccess =
     fromParam === "dashboard" || fromParam?.startsWith("/dashboard");
 
   useEffect(() => {
-    if (!isAuthLoading && isAuthenticated) {
+    // Only auto-redirect when already authenticated (e.g. page refresh). Success flow handles its own redirect.
+    if (!isAuthLoading && isAuthenticated && !successMessage) {
       router.replace("/dashboard");
     }
-  }, [isAuthLoading, isAuthenticated, router]);
+  }, [isAuthLoading, isAuthenticated, successMessage, router]);
 
   useEffect(() => {
     const emailFromUrl = searchParams.get("email");
@@ -33,17 +79,32 @@ function SignInForm() {
     }
   }, [searchParams]);
 
+  useEffect(() => {
+    if (error && errorRef.current) {
+      errorRef.current.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    }
+  }, [error]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
+    if (typeof window !== "undefined") {
+      sessionStorage.removeItem(SIGNIN_ERROR_KEY);
+    }
     setIsLoading(true);
 
     try {
       await signIn({ email, password });
+      setSuccessMessage("Signed in successfully! Redirecting...");
+      setTimeout(() => {
+        router.replace("/dashboard");
+      }, 1500);
     } catch (err: unknown) {
-      const errorMessage =
-        err instanceof Error ? err.message : "Failed to sign in";
+      const errorMessage = getSignInErrorMessage(err);
       setError(errorMessage);
+      if (typeof window !== "undefined") {
+        sessionStorage.setItem(SIGNIN_ERROR_KEY, errorMessage);
+      }
     } finally {
       setIsLoading(false);
     }
@@ -51,11 +112,13 @@ function SignInForm() {
 
   return (
     <div
+      className="auth-split-layout"
       style={{
         minHeight: "100vh",
         display: "flex",
         flexDirection: "row",
         position: "relative",
+        overflowY: "auto",
         background:
           "linear-gradient(135deg, #f8f4ff 0%, #ede5ff 30%, #f5f0ff 70%, #faf8fc 100%)",
       }}
@@ -142,8 +205,56 @@ function SignInForm() {
           minHeight: "100vh",
           backgroundColor: "rgba(255,255,255,0.85)",
           backdropFilter: "blur(12px)",
+          overflowY: "auto",
         }}
       >
+        {/* Sticky success banner */}
+        {successMessage && (
+          <div
+            role="status"
+            style={{
+              position: "sticky",
+              top: 0,
+              zIndex: 20,
+              width: "100%",
+              maxWidth: "400px",
+              padding: "12px 16px",
+              backgroundColor: "#e8f5e9",
+              border: "1px solid #2eb886",
+              borderRadius: "8px",
+              marginBottom: "16px",
+              fontSize: "14px",
+              color: "#2eb886",
+              fontWeight: 500,
+            }}
+          >
+            {successMessage}
+          </div>
+        )}
+        {/* Sticky error banner - always visible when present */}
+        {error && (
+          <div
+            ref={errorRef}
+            role="alert"
+            style={{
+              position: "sticky",
+              top: 0,
+              zIndex: 20,
+              width: "100%",
+              maxWidth: "400px",
+              padding: "12px 16px",
+              backgroundColor: "#fef0f0",
+              border: "1px solid #e01e5a",
+              borderRadius: "8px",
+              marginBottom: "16px",
+              fontSize: "14px",
+              color: "#e01e5a",
+              fontWeight: 500,
+            }}
+          >
+            {error}
+          </div>
+        )}
         <div
           style={{
             width: "100%",
@@ -180,7 +291,13 @@ function SignInForm() {
               border: "1px solid rgba(63, 14, 64, 0.08)",
             }}
           >
-            <form onSubmit={handleSubmit}>
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                handleSubmit(e);
+              }}
+            >
               {verifiedMessage && (
                 <div
                   style={{
@@ -194,22 +311,6 @@ function SignInForm() {
                   }}
                 >
                   Account verified. Sign in to continue.
-                </div>
-              )}
-
-              {error && (
-                <div
-                  style={{
-                    padding: "12px 16px",
-                    backgroundColor: "#fef0f0",
-                    border: "1px solid #e01e5a",
-                    borderRadius: "8px",
-                    marginBottom: "20px",
-                    fontSize: "14px",
-                    color: "#e01e5a",
-                  }}
-                >
-                  {error}
                 </div>
               )}
 
@@ -301,7 +402,7 @@ function SignInForm() {
 
               <button
                 type="submit"
-                disabled={isLoading}
+                disabled={isLoading || !!successMessage}
                 style={{
                   width: "100%",
                   padding: "14px",
@@ -325,7 +426,11 @@ function SignInForm() {
                   }
                 }}
               >
-                {isLoading ? "Signing in..." : "Sign In"}
+                {successMessage
+                  ? "Redirecting..."
+                  : isLoading
+                  ? "Signing in..."
+                  : "Sign In"}
               </button>
             </form>
           </div>
