@@ -20,7 +20,7 @@ Slack (Socket Mode) → Bolt → Pipeline → DB → Socket.IO → Next.js UI
 | **pnpm**    | Latest (`npm install -g pnpm`) |
 | **Git**     | For cloning the repository     |
 
-**Accounts:** Supabase ([sign up](https://supabase.com)), Slack workspace, [OpenAI API key](https://platform.openai.com/api-keys).
+**Accounts:** Supabase ([sign up](https://supabase.com)), Slack workspace, [OpenAI API key](https://platform.openai.com/api-keys), [AWS](https://aws.amazon.com) (for Cognito User Pool — required for dashboard sign-in).
 
 **Verify:**
 
@@ -54,10 +54,14 @@ This installs dependencies for all workspaces (backend, web, shared).
 1. Create a project at [supabase.com](https://supabase.com) (New Project → name, password, region).
 2. In the dashboard, open **SQL Editor**, run the migrations in order:
    - `supabase/migrations/001_initial_schema.sql` - Core schema (tickets, messages, embeddings)
+   - `supabase/migrations/002_message_embeddings_similarity.sql` - Message embeddings and similarity search
+   - `supabase/migrations/003_message_username.sql` - Message username column
+   - `supabase/migrations/004_ticket_summary_assignees.sql` - Ticket summary and assignees
    - `supabase/migrations/005_messages_update_trigger.sql` - Message update trigger
    - `supabase/migrations/006_scored_matching.sql` - Scored matching functions
    - `supabase/migrations/007_cross_channel_context.sql` - Cross-channel context RPCs and `is_context_only` column
    - `supabase/migrations/008_summary_embedding.sql` - `summary_embedding` column and RPCs using it for matching
+   - `supabase/migrations/009_redundancy_detection.sql` - Redundancy detection columns and helpers
 3. In **Project Settings** → **API**, copy **Project URL** and **Service role key** (use as `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`). Never expose the service role key in the frontend or in public repos.
 
 ### 3. Slack app
@@ -75,7 +79,25 @@ This installs dependencies for all workspaces (backend, web, shared).
 
 Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys). Ensure the account has access to **gpt-4o-mini** and **text-embedding-3-small**.
 
-### 5. Environment variables
+### 5. AWS Cognito
+
+The dashboard uses AWS Cognito for sign-up and sign-in. Create a User Pool and app client, then add the resulting values to your `.env` (see [§6 Environment variables](#6-environment-variables)).
+
+1. In the [AWS Console](https://console.aws.amazon.com), open **Cognito** → **User Pools** → **Create user pool**.
+2. **Sign-in experience:** Choose **Cognito user pool** → **Email** as the sign-in option (or Email and password if you prefer). Continue.
+3. **Security requirements:** Choose password policy and MFA as needed. Continue.
+4. **Sign-up experience:** Enable self-registration if you want users to sign up from the app. Under **Required attributes**, include at least **email**, **given_name**, **family_name**, and **preferred_username** (or match what the app expects). Continue.
+5. **Message delivery:** Use Cognito’s default email (or configure SES). Continue.
+6. **Integrate your app:** Set a **User pool name** (e.g. `nixo-dashboard`). Continue.
+7. **Create app client:** Create an app client (e.g. `nixo-web`). For a browser app, create **without** a client secret (public client). Note the **Client ID**. Configure callback URL(s) and sign-out URL(s) if you use hosted UI; for Amplify/JS in the Next.js app, the app uses the client ID and region only.
+8. Create the user pool. In the pool’s **User pool overview**, copy:
+   - **User pool ID** → `NEXT_PUBLIC_COGNITO_USER_POOL_ID`
+   - **Region** (e.g. `us-east-1`) → `NEXT_PUBLIC_COGNITO_REGION`
+   - From **App integration** → **App client** → the **Client ID** → `NEXT_PUBLIC_COGNITO_CLIENT_ID`
+
+Add these three values to your root `.env` so the dashboard can authenticate users.
+
+### 6. Environment variables
 
 All configuration is in a single root `.env` file. Copy the example and edit:
 
@@ -86,43 +108,47 @@ cp .env.example .env
 
 Set each variable:
 
-| Variable                         | Description                                                                 | Example / Notes             |
-| -------------------------------- | --------------------------------------------------------------------------- | --------------------------- |
-| **Slack**                        |                                                                             |                             |
-| `SLACK_BOT_TOKEN`                | Bot User OAuth Token                                                        | `xoxb-...`                  |
-| `SLACK_APP_TOKEN`                | App-Level Token (Socket Mode)                                               | `xapp-...`                  |
-| `SLACK_SIGNING_SECRET`           | Signing Secret                                                              | Optional                    |
-| `FDE_USER_ID`                    | Your Slack user ID                                                          | `U1234567890`               |
-| **OpenAI**                       |                                                                             |                             |
-| `OPENAI_API_KEY`                 | OpenAI API key                                                              | `sk-...`                    |
-| `OPENAI_CONCURRENCY`             | Max concurrent OpenAI calls                                                 | `3` (default)               |
-| `CHANNEL_CONTEXT_LIMIT`          | Number of recent channel messages to fetch for classification context       | `15` (default)              |
-| `SCORE_THRESHOLD`                | Match score threshold for Step 3 semantic matching (0-1, higher = stricter) | `0.75` (default)            |
-| `RECENT_CHANNEL_SCORE_THRESHOLD` | Match score threshold for Step 3.5 recent-channel fallback                  | `0.65` (default)            |
-| `RECENT_WINDOW_MINUTES`          | Time window for recent-channel grouping                                     | `5` (default)               |
-| `SIMILARITY_GRAYZONE_LOW`        | Lower bound of gray-zone distance range for LLM merge check                 | `0.17` (default)            |
-| `SIMILARITY_GRAYZONE_HIGH`       | Upper bound of gray-zone distance range for LLM merge check                 | `0.30` (default)            |
-| `CROSS_CHANNEL_DAYS`             | Days to look back for cross-channel context retrieval (CCR)                 | `14` (default)              |
-| `MATCH_TOPK_TICKETS`             | Number of ticket candidates to fetch for CCR                                | `15` (default)              |
-| `MATCH_TOPK_MESSAGES`            | Number of message candidates to fetch for CCR                               | `25` (default)              |
-| `SAME_THREAD_BONUS`              | Score bonus when message is in same thread as candidate ticket              | `0.12` (default)            |
-| `THREAD_IRRELEVANT_BLOCK`        | Block irrelevant filler in thread even when sameThread                      | `true` (default)            |
-| `THREAD_CONTEXT_ONLY_MIN_SCORE`  | Min score for irrelevant thread messages to attach as context-only          | `0.60` (default)            |
-| **Supabase**                     |                                                                             |                             |
-| `SUPABASE_URL`                   | Supabase project URL                                                        | `https://xxxxx.supabase.co` |
-| `SUPABASE_SERVICE_ROLE_KEY`      | Service role key                                                            | Project Settings → API      |
-| **Backend**                      |                                                                             |                             |
-| `APP_ORIGIN`                     | CORS origin for dashboard                                                   | `http://localhost:3000`     |
-| `PORT`                           | Backend port                                                                | `4000`                      |
-| `NODE_ENV`                       | Environment                                                                 | `development`               |
-| **Frontend**                     |                                                                             |                             |
-| `NEXT_PUBLIC_SOCKET_URL`         | Backend URL for Socket.IO                                                   | `http://localhost:4000`     |
-| `NEXT_PUBLIC_API_URL`            | Backend URL for API                                                         | `http://localhost:4000`     |
-| `NEXT_PUBLIC_APP_ORIGIN`         | Web app origin (for server-side fetch of tickets, e.g. dashboard/tickets)   | `http://localhost:3000`     |
+| Variable                           | Description                                                                 | Example / Notes             |
+| ---------------------------------- | --------------------------------------------------------------------------- | --------------------------- |
+| **Slack**                          |                                                                             |                             |
+| `SLACK_BOT_TOKEN`                  | Bot User OAuth Token                                                        | `xoxb-...`                  |
+| `SLACK_APP_TOKEN`                  | App-Level Token (Socket Mode)                                               | `xapp-...`                  |
+| `SLACK_SIGNING_SECRET`             | Signing Secret                                                              | Optional                    |
+| `FDE_USER_ID`                      | Your Slack user ID                                                          | `U1234567890`               |
+| **OpenAI**                         |                                                                             |                             |
+| `OPENAI_API_KEY`                   | OpenAI API key                                                              | `sk-...`                    |
+| `OPENAI_CONCURRENCY`               | Max concurrent OpenAI calls                                                 | `3` (default)               |
+| `CHANNEL_CONTEXT_LIMIT`            | Number of recent channel messages to fetch for classification context       | `15` (default)              |
+| `SCORE_THRESHOLD`                  | Match score threshold for Step 3 semantic matching (0-1, higher = stricter) | `0.75` (default)            |
+| `RECENT_CHANNEL_SCORE_THRESHOLD`   | Match score threshold for Step 3.5 recent-channel fallback                  | `0.65` (default)            |
+| `RECENT_WINDOW_MINUTES`            | Time window for recent-channel grouping                                     | `5` (default)               |
+| `SIMILARITY_GRAYZONE_LOW`          | Lower bound of gray-zone distance range for LLM merge check                 | `0.17` (default)            |
+| `SIMILARITY_GRAYZONE_HIGH`         | Upper bound of gray-zone distance range for LLM merge check                 | `0.30` (default)            |
+| `CROSS_CHANNEL_DAYS`               | Days to look back for cross-channel context retrieval (CCR)                 | `14` (default)              |
+| `MATCH_TOPK_TICKETS`               | Number of ticket candidates to fetch for CCR                                | `15` (default)              |
+| `MATCH_TOPK_MESSAGES`              | Number of message candidates to fetch for CCR                               | `25` (default)              |
+| `SAME_THREAD_BONUS`                | Score bonus when message is in same thread as candidate ticket              | `0.12` (default)            |
+| `THREAD_IRRELEVANT_BLOCK`          | Block irrelevant filler in thread even when sameThread                      | `true` (default)            |
+| `THREAD_CONTEXT_ONLY_MIN_SCORE`    | Min score for irrelevant thread messages to attach as context-only          | `0.60` (default)            |
+| **Supabase**                       |                                                                             |                             |
+| `SUPABASE_URL`                     | Supabase project URL                                                        | `https://xxxxx.supabase.co` |
+| `SUPABASE_SERVICE_ROLE_KEY`        | Service role key                                                            | Project Settings → API      |
+| **Backend**                        |                                                                             |                             |
+| `APP_ORIGIN`                       | CORS origin for dashboard                                                   | `http://localhost:3000`     |
+| `PORT`                             | Backend port                                                                | `4000`                      |
+| `NODE_ENV`                         | Environment                                                                 | `development`               |
+| **Frontend**                       |                                                                             |                             |
+| `NEXT_PUBLIC_SOCKET_URL`           | Backend URL for Socket.IO                                                   | `http://localhost:4000`     |
+| `NEXT_PUBLIC_API_URL`              | Backend URL for API                                                         | `http://localhost:4000`     |
+| `NEXT_PUBLIC_APP_ORIGIN`           | Web app origin (for server-side fetch of tickets, e.g. dashboard/tickets)   | `http://localhost:3000`     |
+| **AWS Cognito**                    |                                                                             |                             |
+| `NEXT_PUBLIC_COGNITO_USER_POOL_ID` | Cognito User Pool ID (dashboard sign-in)                                    | `us-east-1_xxxxxxxxx`       |
+| `NEXT_PUBLIC_COGNITO_CLIENT_ID`    | Cognito app client ID (create without secret for browser)                   | From App integration        |
+| `NEXT_PUBLIC_COGNITO_REGION`       | AWS region where the User Pool is created                                   | `us-east-1`                 |
 
 _Note: Legacy variables like `SIMILARITY_THRESHOLD` are preserved for backward compatibility but superseded by score thresholds._
 
-### 6. Run the application
+### 7. Run the application
 
 From the project root:
 
@@ -145,7 +171,7 @@ Note: `/dashboard` and `/dashboard/tickets` are protected and require Sign-up/Lo
 cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 ```
 
-### 7. Verify setup
+### 8. Verify setup
 
 - **Health:** http://localhost:4000/health → `{"status":"ok"}`
 - **Backend API – list tickets:** `GET http://localhost:4000/api/tickets` (optional `?status=open|closed|resolved`) → JSON array of tickets, each including `message_count`
@@ -286,7 +312,8 @@ When a new Slack message arrives, it goes through a multi-step matching process.
 
 - **Bot not receiving events**: Check Socket Mode and `message.channels` scope.
 - **Missing scopes**: Reinstall app after adding `channels:history`.
-- **Dashboard blank**: Ensure you are at `/dashboard` or `/dashboard/tickets` and the backend is running.
+- **Dashboard blank**: Ensure you are at `/dashboard` or `/dashboard/tickets`, the backend is running, and Cognito env vars are set.
+- **Sign-in / sign-up fails**: Check `NEXT_PUBLIC_COGNITO_USER_POOL_ID`, `NEXT_PUBLIC_COGNITO_CLIENT_ID`, and `NEXT_PUBLIC_COGNITO_REGION`; ensure the app client was created without a secret (public client).
 - **Database errors**: Check `SUPABASE_URL` and run migrations in order.
 
 ---
