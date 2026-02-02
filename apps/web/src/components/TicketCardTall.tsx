@@ -4,17 +4,26 @@ import React, { useState, useEffect, useRef } from "react";
 import type { Ticket } from "@nixo-slackbot/shared";
 import Link from "next/link";
 
-interface TicketCardProps {
+interface TicketCardTallProps {
   ticket: Ticket;
   messageCount?: number;
   onDelete?: (ticketId: string) => void;
 }
 
-export function TicketCard({
+function getInitials(username: string | null | undefined): string {
+  if (!username || !username.trim()) return "?";
+  const parts = username.trim().split(/\s+/);
+  if (parts.length >= 2) {
+    return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase().slice(0, 2);
+  }
+  return username.slice(0, 2).toUpperCase();
+}
+
+export function TicketCardTall({
   ticket,
   messageCount = 0,
   onDelete,
-}: TicketCardProps) {
+}: TicketCardTallProps) {
   const [isHovered, setIsHovered] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [showDropdown, setShowDropdown] = useState(false);
@@ -41,6 +50,8 @@ export function TicketCard({
   const categoryColor = categoryColors[ticket.category] || "#616061";
   const priority = ticket.summary?.priority_hint || "medium";
   const priorityStyle = priorityConfig[priority] || priorityConfig.medium;
+  const reporterName = ticket.reporter_username ?? "Unknown";
+  const reporterInitials = getInitials(ticket.reporter_username ?? null);
 
   const formatDate = (dateString: string) => {
     const date = new Date(dateString);
@@ -49,36 +60,29 @@ export function TicketCard({
     const diffMins = Math.floor(diffMs / 60000);
     const diffHours = Math.floor(diffMs / 3600000);
     const diffDays = Math.floor(diffMs / 86400000);
-
     if (diffMins < 1) return "just now";
     if (diffMins < 60) return `${diffMins}m ago`;
     if (diffHours < 24) return `${diffHours}h ago`;
     if (diffDays < 7) return `${diffDays}d ago`;
-    return date.toLocaleDateString("en-US", {
-      month: "short",
-      day: "numeric",
-    });
+    return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
   };
 
-  // Handle dropdown open/close with animation
   useEffect(() => {
-    if (showDropdown) {
-      setDropdownVisible(true);
-    } else {
-      const timeout = setTimeout(() => setDropdownVisible(false), 150);
-      return () => clearTimeout(timeout);
+    if (showDropdown) setDropdownVisible(true);
+    else {
+      const t = setTimeout(() => setDropdownVisible(false), 150);
+      return () => clearTimeout(t);
     }
   }, [showDropdown]);
 
-  // Close dropdown on click outside
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (
         dropdownRef.current &&
-        !dropdownRef.current.contains(e.target as Node)
-      ) {
-        if (!isDeleting) setShowDropdown(false);
-      }
+        !dropdownRef.current.contains(e.target as Node) &&
+        !isDeleting
+      )
+        setShowDropdown(false);
     };
     if (showDropdown) {
       document.addEventListener("mousedown", handleClickOutside);
@@ -87,12 +91,10 @@ export function TicketCard({
     }
   }, [showDropdown, isDeleting]);
 
-  // Close on Escape
   useEffect(() => {
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && showDropdown && !isDeleting) {
+      if (e.key === "Escape" && showDropdown && !isDeleting)
         setShowDropdown(false);
-      }
     };
     document.addEventListener("keydown", handleEscape);
     return () => document.removeEventListener("keydown", handleEscape);
@@ -101,7 +103,7 @@ export function TicketCard({
   const toggleDropdown = (e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
-    if (!isDeleting) setShowDropdown(!showDropdown);
+    if (!isDeleting) setShowDropdown((v) => !v);
   };
 
   const confirmDelete = async (e: React.MouseEvent) => {
@@ -112,15 +114,12 @@ export function TicketCard({
       const res = await fetch(`/api/tickets/${ticket.id}`, {
         method: "DELETE",
       });
-
       if (res.ok) {
         setShowDropdown(false);
         onDelete?.(ticket.id);
-      } else {
-        alert("Failed to delete ticket");
-      }
-    } catch (error) {
-      console.error("Error deleting ticket:", error);
+      } else alert("Failed to delete ticket");
+    } catch (err) {
+      console.error(err);
       alert("Failed to delete ticket");
     } finally {
       setIsDeleting(false);
@@ -141,42 +140,74 @@ export function TicketCard({
         position: "relative",
         backgroundColor: "#ffffff",
         borderLeft: `3px solid ${categoryColor}`,
-        borderRadius: "4px",
+        borderRadius: "6px",
         transition: "all 0.15s ease",
         boxShadow: isHovered
-          ? "0 1px 3px rgba(0,0,0,0.12)"
-          : "0 1px 2px rgba(0,0,0,0.05)",
+          ? "0 2px 6px rgba(0,0,0,0.1)"
+          : "0 1px 3px rgba(0,0,0,0.06)",
         transform: isHovered ? "translateY(-1px)" : "none",
         opacity: isDeleting ? 0.5 : 1,
         zIndex: showDropdown ? 1000 : undefined,
       }}
     >
       <Link
-        href={`/tickets/${ticket.id}?from=dashboard`}
+        href={`/tickets/${ticket.id}?from=tickets`}
         style={{
           textDecoration: "none",
           display: "block",
-          padding: "12px 40px 12px 16px",
+          padding: "16px 48px 16px 20px",
           cursor: "pointer",
         }}
       >
-        {/* Title */}
-        <h3
+        {/* Top row: reporter icon + title + time */}
+        <div
           style={{
-            color: "#1d1c1d",
-            fontWeight: 600,
-            fontSize: "14px",
-            marginBottom: "6px",
-            lineHeight: 1.4,
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis",
+            display: "flex",
+            alignItems: "flex-start",
+            gap: "12px",
+            marginBottom: "12px",
           }}
         >
-          {ticket.title}
-        </h3>
+          <div
+            style={{
+              width: "36px",
+              height: "36px",
+              borderRadius: "8px",
+              backgroundColor: "#1264a3",
+              color: "#ffffff",
+              fontSize: "12px",
+              fontWeight: 600,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              flexShrink: 0,
+            }}
+          >
+            {reporterInitials}
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h3
+              style={{
+                color: "#1d1c1d",
+                fontWeight: 600,
+                fontSize: "15px",
+                marginBottom: "4px",
+                lineHeight: 1.4,
+                display: "-webkit-box",
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: "vertical",
+                overflow: "hidden",
+              }}
+            >
+              {ticket.title}
+            </h3>
+            <span style={{ fontSize: "12px", color: "#616061" }}>
+              {formatDate(ticket.updated_at)}
+            </span>
+          </div>
+        </div>
 
-        {/* Meta row */}
+        {/* Meta: category, status, priority */}
         <div
           style={{
             display: "flex",
@@ -184,9 +215,9 @@ export function TicketCard({
             gap: "12px",
             fontSize: "12px",
             color: "#616061",
+            marginBottom: "10px",
           }}
         >
-          {/* Category dot + label */}
           <span style={{ display: "flex", alignItems: "center", gap: "5px" }}>
             <span
               style={{
@@ -201,8 +232,6 @@ export function TicketCard({
               {ticket.category.replace(/_/g, " ")}
             </span>
           </span>
-
-          {/* Status */}
           <span
             style={{
               textTransform: "capitalize",
@@ -211,8 +240,6 @@ export function TicketCard({
           >
             {ticket.status}
           </span>
-
-          {/* Priority */}
           <span
             style={{
               padding: "2px 6px",
@@ -226,15 +253,34 @@ export function TicketCard({
           >
             {priorityStyle.label}
           </span>
+        </div>
 
-          {/* Time */}
-          <span style={{ marginLeft: "auto" }}>
-            {formatDate(ticket.updated_at)}
-          </span>
+        {/* Reported by + Messages */}
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            gap: "4px",
+            fontSize: "12px",
+            color: "#616061",
+          }}
+        >
+          <div>
+            <span style={{ fontWeight: 600, color: "#1d1c1d" }}>
+              Reported by:{" "}
+            </span>
+            {reporterName}
+          </div>
+          <div>
+            <span style={{ fontWeight: 600, color: "#1d1c1d" }}>
+              Messages:{" "}
+            </span>
+            {messageCount}
+          </div>
         </div>
       </Link>
 
-      {/* Delete button container */}
+      {/* Delete button */}
       <div
         ref={dropdownRef}
         style={{
@@ -244,7 +290,6 @@ export function TicketCard({
           transform: "translateY(-50%)",
         }}
       >
-        {/* Delete button */}
         <button
           onClick={toggleDropdown}
           disabled={isDeleting}
@@ -254,7 +299,6 @@ export function TicketCard({
             padding: "6px",
             cursor: isDeleting ? "not-allowed" : "pointer",
             opacity: isDeleting ? 0.5 : 0.6,
-            transition: "all 0.15s ease",
             borderRadius: "4px",
             display: "flex",
             alignItems: "center",
@@ -285,8 +329,6 @@ export function TicketCard({
             <path d="M2 4h12M5.333 4V2.667a1.333 1.333 0 0 1 1.334-1.334h2.666a1.333 1.333 0 0 1 1.334 1.334V4M6.667 7.333v4M9.333 7.333v4M12.667 4v9.333a1.333 1.333 0 0 1-1.334 1.334H4.667a1.333 1.333 0 0 1-1.334-1.334V4" />
           </svg>
         </button>
-
-        {/* Dropdown */}
         {dropdownVisible && (
           <div
             style={{
@@ -330,15 +372,6 @@ export function TicketCard({
                   border: "1px solid #e0e0e0",
                   borderRadius: "4px",
                   cursor: isDeleting ? "not-allowed" : "pointer",
-                  transition: "all 100ms ease",
-                }}
-                onMouseEnter={(e) => {
-                  if (!isDeleting) {
-                    e.currentTarget.style.backgroundColor = "#f0f0f0";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "#f8f8f8";
                 }}
               >
                 Cancel
@@ -357,15 +390,6 @@ export function TicketCard({
                   borderRadius: "4px",
                   cursor: isDeleting ? "not-allowed" : "pointer",
                   opacity: isDeleting ? 0.7 : 1,
-                  transition: "all 100ms ease",
-                }}
-                onMouseEnter={(e) => {
-                  if (!isDeleting) {
-                    e.currentTarget.style.backgroundColor = "#c0184a";
-                  }
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.backgroundColor = "#e01e5a";
                 }}
               >
                 {isDeleting ? "..." : "Delete"}

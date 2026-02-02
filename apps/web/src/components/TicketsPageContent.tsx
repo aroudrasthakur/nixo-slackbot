@@ -2,19 +2,18 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import type { Ticket } from "@nixo-slackbot/shared";
-import { StatsCards } from "@/components/StatsCards";
 import { DashboardTickets } from "@/components/DashboardTickets";
 import { useSocket } from "@/hooks/useSocket";
 
-interface DashboardContentProps {
+interface TicketsPageContentProps {
   initialTickets: Ticket[];
   initialError?: string;
 }
 
-export function DashboardContent({
+export function TicketsPageContent({
   initialTickets,
   initialError,
-}: DashboardContentProps) {
+}: TicketsPageContentProps) {
   const [tickets, setTickets] = useState<Ticket[]>(initialTickets);
   const [error, setError] = useState<string | null>(initialError ?? null);
   const [loading, setLoading] = useState(false);
@@ -39,24 +38,20 @@ export function DashboardContent({
     }
   }, []);
 
-  // Refetch tickets and metrics every time the dashboard is shown (mount / navigation to /dashboard)
   useEffect(() => {
     fetchTickets();
   }, [fetchTickets]);
 
-  // Refetch when a ticket is created or updated (socket event from backend)
   useEffect(() => {
     const unsubscribe = onTicketUpdated(fetchTickets);
     return unsubscribe;
   }, [onTicketUpdated, fetchTickets]);
 
-  // Refetch when socket connects/reconnects so we don't miss updates that happened while disconnected
   useEffect(() => {
     const unsubscribe = onConnect(fetchTickets);
     return unsubscribe;
   }, [onConnect, fetchTickets]);
 
-  // Refetch after delete so stats and list stay in sync
   const handleDeleteTicket = useCallback(
     (ticketId: string) => {
       setTickets((prev) => prev.filter((t) => t.id !== ticketId));
@@ -67,7 +62,6 @@ export function DashboardContent({
 
   return (
     <>
-      {/* Connection error */}
       {error && (
         <div
           style={{
@@ -86,14 +80,11 @@ export function DashboardContent({
         </div>
       )}
 
-      {/* Stats Cards – always use current tickets so metrics update on create/delete */}
-      <StatsCards tickets={tickets} />
-
-      {/* Tickets list – title is dynamic inside DashboardTickets based on filters */}
       <DashboardTickets
         tickets={tickets}
         loading={loading}
         onDeleteTicket={handleDeleteTicket}
+        cardVariant="tall"
       />
     </>
   );

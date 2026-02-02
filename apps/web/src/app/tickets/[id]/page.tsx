@@ -18,11 +18,19 @@ async function getTicket(id: string): Promise<TicketWithMessages | null> {
   return res.json();
 }
 
+function getBackHref(from: string | null): string {
+  if (from === "tickets") return "/dashboard/tickets";
+  return "/dashboard";
+}
+
 export default async function TicketPage({
   params,
+  searchParams,
 }: {
   params: { id: string };
+  searchParams: { from?: string };
 }) {
+  const backHref = getBackHref(searchParams.from ?? null);
   const ticket = await getTicket(params.id);
 
   if (!ticket) {
@@ -36,7 +44,7 @@ export default async function TicketPage({
       >
         <div style={{ maxWidth: "800px", margin: "0 auto" }}>
           <Link
-            href="/dashboard"
+            href={backHref}
             style={{
               display: "inline-flex",
               alignItems: "center",
@@ -49,9 +57,18 @@ export default async function TicketPage({
             }}
           >
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-              <path d="M11 2L5 8l6 6" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+              <path
+                d="M11 2L5 8l6 6"
+                stroke="currentColor"
+                strokeWidth="2"
+                fill="none"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
             </svg>
-            Back to tickets
+            {backHref === "/dashboard/tickets"
+              ? "Back to tickets"
+              : "Back to dashboard"}
           </Link>
           <div
             style={{
@@ -72,7 +89,8 @@ export default async function TicketPage({
               Ticket Not Found
             </h1>
             <p style={{ color: "#616061", fontSize: "14px" }}>
-              The ticket you&apos;re looking for doesn&apos;t exist or has been removed.
+              The ticket you&apos;re looking for doesn&apos;t exist or has been
+              removed.
             </p>
           </div>
         </div>
@@ -89,9 +107,9 @@ export default async function TicketPage({
       }}
     >
       <div style={{ maxWidth: "800px", margin: "0 auto" }}>
-        {/* Back button */}
+        {/* Back button - returns to dashboard or tickets tab based on ?from= */}
         <Link
-          href="/dashboard"
+          href={backHref}
           style={{
             display: "inline-flex",
             alignItems: "center",
@@ -104,9 +122,18 @@ export default async function TicketPage({
           }}
         >
           <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor">
-            <path d="M11 2L5 8l6 6" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round"/>
+            <path
+              d="M11 2L5 8l6 6"
+              stroke="currentColor"
+              strokeWidth="2"
+              fill="none"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
           </svg>
-          Back to tickets
+          {backHref === "/dashboard/tickets"
+            ? "Back to tickets"
+            : "Back to dashboard"}
         </Link>
 
         <TicketDetail ticket={ticket} />

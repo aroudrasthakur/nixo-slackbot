@@ -1,9 +1,46 @@
 import { Router } from 'express';
 import { getTickets, getTicket, deleteTicket, updateTicket } from '../db/tickets';
-import type { TicketStatus } from '@nixo-slackbot/shared';
+import type { TicketStatus, TicketWithMessages, Message } from '@nixo-slackbot/shared';
 import { emitTicketUpdated } from '../socket/events';
+import { boltApp } from '../slack/bolt';
 
 const router = Router();
+
+/** Resolve channel and workspace names from Slack and attach to messages */
+async function enrichMessagesWithSlackNames(
+  messages: Message[]
+): Promise<Message[]> {
+  if (messages.length === 0) return messages;
+
+  const channelIds = [...new Set(messages.map((m) => m.slack_channel_id))];
+  const channelNames = new Map<string, string>();
+  let workspaceName: string | null = null;
+
+  try {
+    const [authResult, ...channelResults] = await Promise.all([
+      boltApp.client.auth.test(),
+      ...channelIds.map((channelId) =>
+        boltApp.client.conversations.info({ channel: channelId }).catch(() => ({ ok: false }))
+      ),
+    ]);
+    if (authResult?.team) workspaceName = authResult.team;
+    channelResults.forEach((res: { ok?: boolean; channel?: { name?: string } }, i) => {
+      const id = channelIds[i];
+      if (res?.ok && res.channel?.name) {
+        const name = res.channel.name.startsWith('#') ? res.channel.name : `#${res.channel.name}`;
+        channelNames.set(id, name);
+      }
+    });
+  } catch (err) {
+    console.warn('[Tickets] Could not resolve Slack channel/workspace names:', err);
+  }
+
+  return messages.map((m) => ({
+    ...m,
+    slack_channel_name: channelNames.get(m.slack_channel_id) ?? null,
+    slack_workspace_name: workspaceName ?? null,
+  }));
+}
 
 router.get('/', async (req, res) => {
   try {
@@ -22,7 +59,12 @@ router.get('/:id', async (req, res) => {
     if (!ticket) {
       return res.status(404).json({ error: 'Ticket not found' });
     }
-    res.json(ticket);
+    const enrichedMessages = await enrichMessagesWithSlackNames(ticket.messages);
+    const enrichedTicket: TicketWithMessages = {
+      ...ticket,
+      messages: enrichedMessages,
+    };
+    res.json(enrichedTicket);
   } catch (error: any) {
     console.error('Error fetching ticket:', error);
     res.status(500).json({ error: error.message || 'Failed to fetch ticket' });

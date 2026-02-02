@@ -29,6 +29,9 @@ export function StatsCards({ tickets }: StatsCardsProps) {
   const featureRequests = tickets.filter(
     (t) => t.category === "feature_request"
   ).length;
+  const productQuestions = tickets.filter(
+    (t) => t.category === "product_question"
+  ).length;
 
   const stats = [
     {
@@ -194,6 +197,19 @@ export function StatsCards({ tickets }: StatsCardsProps) {
               />
               <span style={{ fontSize: "14px", color: "#616061" }}>
                 Features: {featureRequests}
+              </span>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <div
+                style={{
+                  width: "10px",
+                  height: "10px",
+                  borderRadius: "50%",
+                  backgroundColor: "#611f69",
+                }}
+              />
+              <span style={{ fontSize: "14px", color: "#616061" }}>
+                Product questions: {productQuestions}
               </span>
             </div>
           </div>

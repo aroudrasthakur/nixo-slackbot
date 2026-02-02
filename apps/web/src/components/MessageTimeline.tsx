@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import type { Message } from "@nixo-slackbot/shared";
 
 interface MessageTimelineProps {
@@ -8,6 +8,14 @@ interface MessageTimelineProps {
 }
 
 export function MessageTimeline({ messages }: MessageTimelineProps) {
+  const [showRedundant, setShowRedundant] = useState(false);
+
+  // Filter redundant messages by default
+  const visibleMessages = showRedundant 
+    ? messages 
+    : messages.filter(m => !m.is_redundant);
+  
+  const redundantCount = messages.filter(m => m.is_redundant).length;
   const formatTime = (dateString: string) => {
     const date = new Date(dateString);
     return date.toLocaleTimeString("en-US", {
@@ -127,6 +135,8 @@ export function MessageTimeline({ messages }: MessageTimelineProps) {
                   color: "inherit",
                   transition: "background-color 0.15s ease",
                   cursor: "pointer",
+                  opacity: message.is_redundant ? 0.7 : 1,
+                  backgroundColor: message.is_redundant ? "#fafafa" : "transparent",
                 }}
                 onMouseEnter={(e) => {
                   e.currentTarget.style.backgroundColor = "#f8f8f8";
@@ -156,11 +166,12 @@ export function MessageTimeline({ messages }: MessageTimelineProps) {
 
                 {/* Message content */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  {/* Header */}
+                  {/* Header: user, time, channel & workspace */}
                   <div
                     style={{
                       display: "flex",
                       alignItems: "baseline",
+                      flexWrap: "wrap",
                       gap: "8px",
                       marginBottom: "4px",
                     }}
@@ -177,6 +188,27 @@ export function MessageTimeline({ messages }: MessageTimelineProps) {
                     <span style={{ fontSize: "12px", color: "#616061" }}>
                       {formatTime(message.created_at)}
                     </span>
+                    {(() => {
+                      const channelLabel =
+                        message.slack_channel_name ??
+                        (message.slack_channel_id && `#${message.slack_channel_id.slice(-8)}`);
+                      const workspaceLabel =
+                        message.slack_workspace_name ??
+                        (message.slack_team_id && message.slack_team_id.slice(-8));
+                      const label = [channelLabel, workspaceLabel].filter(Boolean).join(" · ");
+                      if (!label) return null;
+                      return (
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            color: "#8b8b8b",
+                            marginLeft: "auto",
+                          }}
+                        >
+                          {label}
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   {/* Text bubble */}

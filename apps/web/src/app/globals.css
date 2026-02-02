@@ -39,6 +39,11 @@ input, button, select, textarea {
   font-size: inherit;
 }
 
+/* Override Tailwind preflight (* { padding: 0 }) so select dropdowns keep right padding for the arrow */
+main select {
+  padding-right: 20px;
+}
+
 /* Loading logo animation */
 @keyframes loading-pulse {
   0%, 100% {

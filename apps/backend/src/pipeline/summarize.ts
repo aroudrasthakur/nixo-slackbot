@@ -35,6 +35,37 @@ const DEFAULT_SUMMARY: TicketSummary = {
 };
 
 /**
+ * Compute embedding for a ticket summary.
+ * Builds embed text from title, category, summary, and signals.
+ * Uses text-embedding-3-small (1536 dims) with p-limit concurrency control.
+ */
+export async function computeSummaryEmbedding(params: {
+  title: string;
+  category: string;
+  summary: TicketSummary;
+  signals: string[];
+}): Promise<number[] | null> {
+  const { title, category, summary, signals } = params;
+
+  // Build embed text: ticket title + category + summary description + signals
+  const signalsText = signals.length > 0 ? signals.join(' ') : '';
+  const embedText = `ticket: ${title}\ncategory: ${category}\nsummary: ${summary.description}\nsignals: ${signalsText}`.substring(0, 2000);
+
+  try {
+    return await openaiLimiter(async () => {
+      const response = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: embedText,
+      });
+      return response.data[0].embedding;
+    });
+  } catch (error) {
+    console.error('[Summarize] Error computing summary embedding:', error);
+    return null;
+  }
+}
+
+/**
  * Generate an AI summary for a ticket based on the message content and classification.
  */
 export async function generateTicketSummary(input: SummarizeInput): Promise<TicketSummary> {

@@ -20,7 +20,7 @@ Slack (Socket Mode) → Bolt → Pipeline → DB → Socket.IO → Next.js UI
 | **pnpm**    | Latest (`npm install -g pnpm`) |
 | **Git**     | For cloning the repository     |
 
-**Accounts:** Supabase ([sign up](https://supabase.com)), Slack workspace, [OpenAI API key](https://platform.openai.com/api-keys). Optional: Python 3.8+ for Python tooling.
+**Accounts:** Supabase ([sign up](https://supabase.com)), Slack workspace, [OpenAI API key](https://platform.openai.com/api-keys).
 
 **Verify:**
 
@@ -43,9 +43,9 @@ cd nixo-slackbot
 pnpm install
 ```
 
-This installs dependencies for all workspaces (backend, web, shared). Dependencies are also listed in `requirements.txt`.
+This installs dependencies for all workspaces (backend, web, shared).
 
-**If you see "Ignored build scripts: esbuild" or install fails:** The root `package.json` has no `install` script (to avoid recursive install loops). The repo includes `.npmrc` with `ignore-scripts=false` so dependency build scripts (e.g. esbuild) can run. To allow scripts only for specific packages, remove that line and run `pnpm approve-builds`, then approve `esbuild`.
+**If you see "Ignored build scripts: esbuild" or install fails:** The root `package.json` has limits scripts (to avoid recursive install loops) except for essential builds. If needed, run `pnpm approve-builds` and approve `esbuild`.
 
 **Verify:** From the root, run `pnpm build`. If it completes without errors, the monorepo is set up.
 
@@ -57,6 +57,7 @@ This installs dependencies for all workspaces (backend, web, shared). Dependenci
    - `supabase/migrations/005_messages_update_trigger.sql` - Message update trigger
    - `supabase/migrations/006_scored_matching.sql` - Scored matching functions
    - `supabase/migrations/007_cross_channel_context.sql` - Cross-channel context RPCs and `is_context_only` column
+   - `supabase/migrations/008_summary_embedding.sql` - `summary_embedding` column and RPCs using it for matching
 3. In **Project Settings** → **API**, copy **Project URL** and **Service role key** (use as `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`). Never expose the service role key in the frontend or in public repos.
 
 ### 3. Slack app
@@ -96,8 +97,6 @@ Set each variable:
 | `OPENAI_API_KEY`                 | OpenAI API key                                                              | `sk-...`                    |
 | `OPENAI_CONCURRENCY`             | Max concurrent OpenAI calls                                                 | `3` (default)               |
 | `CHANNEL_CONTEXT_LIMIT`          | Number of recent channel messages to fetch for classification context       | `15` (default)              |
-| `SIMILARITY_THRESHOLD`           | Cosine distance threshold (deprecated, kept for backward compatibility)     | `0.17` (default)            |
-| `RECENT_CHANNEL_THRESHOLD`       | Recent-channel threshold (deprecated, kept for backward compatibility)      | `0.40` (default)            |
 | `SCORE_THRESHOLD`                | Match score threshold for Step 3 semantic matching (0-1, higher = stricter) | `0.75` (default)            |
 | `RECENT_CHANNEL_SCORE_THRESHOLD` | Match score threshold for Step 3.5 recent-channel fallback                  | `0.65` (default)            |
 | `RECENT_WINDOW_MINUTES`          | Time window for recent-channel grouping                                     | `5` (default)               |
@@ -106,6 +105,9 @@ Set each variable:
 | `CROSS_CHANNEL_DAYS`             | Days to look back for cross-channel context retrieval (CCR)                 | `14` (default)              |
 | `MATCH_TOPK_TICKETS`             | Number of ticket candidates to fetch for CCR                                | `15` (default)              |
 | `MATCH_TOPK_MESSAGES`            | Number of message candidates to fetch for CCR                               | `25` (default)              |
+| `SAME_THREAD_BONUS`              | Score bonus when message is in same thread as candidate ticket              | `0.12` (default)            |
+| `THREAD_IRRELEVANT_BLOCK`        | Block irrelevant filler in thread even when sameThread                      | `true` (default)            |
+| `THREAD_CONTEXT_ONLY_MIN_SCORE`  | Min score for irrelevant thread messages to attach as context-only          | `0.60` (default)            |
 | **Supabase**                     |                                                                             |                             |
 | `SUPABASE_URL`                   | Supabase project URL                                                        | `https://xxxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY`      | Service role key                                                            | Project Settings → API      |
@@ -116,8 +118,9 @@ Set each variable:
 | **Frontend**                     |                                                                             |                             |
 | `NEXT_PUBLIC_SOCKET_URL`         | Backend URL for Socket.IO                                                   | `http://localhost:4000`     |
 | `NEXT_PUBLIC_API_URL`            | Backend URL for API                                                         | `http://localhost:4000`     |
+| `NEXT_PUBLIC_APP_ORIGIN`         | Web app origin (for server-side fetch of tickets, e.g. dashboard/tickets)   | `http://localhost:3000`     |
 
-Do not commit `.env`.
+_Note: Legacy variables like `SIMILARITY_THRESHOLD` are preserved for backward compatibility but superseded by score thresholds._
 
 ### 6. Run the application
 
@@ -128,9 +131,13 @@ pnpm dev
 ```
 
 - **Backend** (Express + Socket.IO + Slack Bolt): http://localhost:4000
-- **Web** (Next.js dashboard): http://localhost:3000
+- **Web App** (Landing Page): http://localhost:3000
+- **Dashboard** (overview): http://localhost:3000/dashboard
+- **Tickets** (tickets-only list): http://localhost:3000/dashboard/tickets
 
-Open http://localhost:3000 for the tickets list. Post a relevant message in a channel where the bot is invited to create a ticket.
+Open **Dashboard** for an overview (stats cards + ticket list with search and filters). Open **Tickets** for a tickets-only view with taller cards (reporter, message count). Post a relevant message in a channel where the bot is invited to create a ticket.
+
+Note: `/dashboard` and `/dashboard/tickets` are protected and require Sign-up/Login to access.
 
 **Run apps individually (optional):**
 
@@ -141,12 +148,26 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 ### 7. Verify setup
 
 - **Health:** http://localhost:4000/health → `{"status":"ok"}`
-- **API:** http://localhost:4000/api/tickets → JSON array of tickets
+- **Backend API – list tickets:** `GET http://localhost:4000/api/tickets` (optional `?status=open|closed|resolved`) → JSON array of tickets, each including `message_count`
+- **Backend API – single ticket:** `GET http://localhost:4000/api/tickets/:id` → ticket with messages
 - **Slack:** Backend logs show "Slack Bolt app started"; sending a relevant message in Slack creates/updates a ticket
-- **Dashboard:** http://localhost:3000 shows the list; new/updated tickets appear in real time (Socket.IO)
+- **Dashboard:** http://localhost:3000/dashboard shows overview and ticket list; http://localhost:3000/dashboard/tickets shows the tickets-only view; new/updated tickets appear in real time (Socket.IO)
+- **Ticket detail:** Open a ticket from Dashboard or Tickets; the back arrow returns to the page you came from (`/dashboard` or `/dashboard/tickets` via `?from=dashboard` or `?from=tickets`)
 - **Test without Slack:**  
   `curl -X POST http://localhost:4000/dev/ingest -H "Content-Type: application/json" -d "{\"channel\":\"C1234567890\",\"ts\":\"1234567890.123456\",\"user\":\"U9876543210\",\"text\":\"I found a bug in the API\"}"`  
   A new ticket should appear on the dashboard.
+
+---
+
+## Demo Script
+
+To demonstrate the system in 1-2 minutes:
+
+1. **Post a feature request** ("We need a button to export reports to PDF") -> **New Ticket Created with category `Feature Request`**.
+2. **Post a vague follow-up** ("I can’t see it anywhere on the settings page") -> **Attaches to previous ticket** (using thread or channel context).
+3. **Post a status update** ("Dev team is looking into this") -> **Attaches as Context-Only** (updates ticket history but doesn't trigger new alerts).
+4. **Post "Thanks!"** -> **Ignored** (Heuristic filter drops it, or attaches silently).
+5. **Show Dashboard / Tickets**: Observe live updates at `http://localhost:3000/dashboard` or `http://localhost:3000/dashboard/tickets` without refreshing.
 
 ---
 
@@ -154,336 +175,119 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 
 ### Relevance Detection
 
-1. **Heuristic filter:** Ignores casual messages (e.g. thanks, ok, cool).
-2. **Context-aware OpenAI classification:** `gpt-4o-mini` with Structured Outputs; categories: `bug_report`, `support_question`, `feature_request`, `product_question`, `irrelevant`. Only messages with `is_relevant: true` become tickets.
-   - **Thread context:** For messages in a Slack thread, fetches previous messages in that thread to understand follow-ups and clarifications.
-   - **Channel context:** For non-thread messages, fetches the last 15 channel messages (configurable via `CHANNEL_CONTEXT_LIMIT`) to detect indirect references (e.g., "I cannot see a button for it" where "it" refers to a feature mentioned earlier).
-   - The classifier uses both context types to determine if a message is relevant, even when it seems vague in isolation.
+1. **Heuristic filter:** Examples like "thanks", "ok", "cool" are flagged as low-signal.
+2. **Context-aware OpenAI classification:** Classifies messages into `bug_report`, `support_question`, `feature_request`, etc.
+   - The system attempts to attach messages to existing tickets (Steps 1–3.6); only messages with `is_relevant: true` create a _new_ ticket (Step 4).
+   - Irrelevant messages may attach as **context-only** only if they meet score and evidence rules (see [Scoring system](docs/SCORING_SYSTEM.md)); pure filler in a thread can be blocked even when in the same thread.
+
+### Relevance and Redundancy
+
+**Definition of "Relevant to FDEs":**
+
+- Actionable requests, bug reports, support questions, product questions
+- Clarifications that change scope or add signals
+- Excludes filler, greetings, pure acknowledgments
+
+**Redundancy Behavior:**
+
+Messages with the same `intent_key` are stored but hidden by default in the ticket timeline. Redundant messages are preserved for audit but do not trigger summary refreshes.
+
+Examples:
+
+- "make the button blue" vs "ensure the button is blue" → redundant (same `intent_key`)
+- "make the dashboard blue" is NOT redundant with button request (different `intent_object`)
+
+**Intent Key Format:**
+
+Format: `${intent_action}|${intent_object}|${intent_value}`
+
+- `intent_object` is required to prevent color-only grouping
+- Ensures "button blue" and "dashboard blue" remain distinct
+- Color tokens alone cannot group messages across different UI components
+
+**UI Behavior:**
+
+- Redundant messages are hidden by default in the ticket detail view
+- A toggle allows viewing redundant confirmations when needed
+- Redundant messages appear with reduced opacity when shown
 
 ### Grouping Algorithm (Step-by-Step Message Matching)
 
-When a new Slack message arrives, it goes through a multi-step matching process to determine whether to attach it to an existing ticket or create a new one. Messages from the same channel are processed sequentially (queue-based) to prevent race conditions.
+When a new Slack message arrives, it goes through a multi-step matching process. Full details (formulas, guardrails, in-thread rules) are in [**docs/SCORING_SYSTEM.md**](docs/SCORING_SYSTEM.md).
 
-#### Step 1: Thread Matching
+#### Step 1: Thread Candidate Boost
 
-- Check if the message's `root_thread_ts` matches any message in an existing **open** ticket
-- `root_thread_ts` = `event.thread_ts ?? event.ts` (stored on every message)
-- **If match found:** Attach message to that ticket, refresh summary → **Done**
+- If `root_thread_ts` matches an open ticket, that ticket is added as a **candidate** with a **sameThread** flag. The message does **not** attach here; it continues through Steps 2–3.6 and is scored like any other message.
+- **sameThread** is a small score bonus (Step 3.5: +0.12, Step 3.6: +0.08), not a pass condition. **Relevance and evidence dominate:** irrelevant thread chatter (e.g. "lol thanks") is dropped unless it meets context-only rules (score ≥ 0.60 and overlap ≥ 1 or status-update or distance ≤ 0.30). Filler messages in thread can be blocked even when sameThread.
 
 #### Step 2: Entity-Based Canonical Key Matching
 
-- Compute a `canonical_key` from extracted entity signals (roles, permissions, objects, platform, endpoints, error codes, feature keywords)
-- Entity extraction includes: roles (admin, superadmin), permissions (access, rbac), objects (budget, csv, export), platform (web, mobile, api), endpoints (`/v1/*`, `/api/*`), error codes (401, 403, 500)
-- Signals are normalized (stopword filtering, stemming) and deduplicated
-- Canonical key = sorted unique tokens joined by "|" (e.g., "dashboard does not allow non-admins to access budget" → `"access_control|admin|budget|dashboard|superadmin"`)
-- **Entity-based canonical keys work globally across channels** (not limited to same channel)
-- Example: "Hey could you add export to CSV?" → canonical key: `csv|export|feature_export`
-- Check if any **open** ticket has the same `canonical_key` (searches across all channels)
-- **If match found:** Attach message to that ticket, refresh summary → **Done**
+- Entity signals and stable canonical key. **Match?** Attach & Done.
 
 #### Step 3: Scored Semantic Matching
 
-See detailed description above in the "Scored Semantic Matching" section. Uses multi-factor scoring with category compatibility as a soft signal.
+- Vector search (prefer **summary_embedding**, fallback **embedding**). Score ≥ `SCORE_THRESHOLD` (0.75) → Attach & Done.
 
-#### Step 3.5: Recent Channel Fallback (Scored)
+#### Step 3.5: Recent Channel Fallback
 
-See detailed description above in the "Recent Channel Fallback (Scored)" section. Uses the same scoring approach with a lower threshold.
+- Same channel, last 5 mins; threshold `RECENT_CHANNEL_SCORE_THRESHOLD` (0.65). Irrelevant messages only attach as context-only if they meet the minimum score and evidence rules.
 
 #### Step 3.6: Cross-Channel Context Retrieval (CCR)
 
-**Purpose:** Enables grouping related issues across multiple channels and longer time windows (days instead of minutes) using DB retrieval (vector search + signals) rather than strict time windows.
-
-**Process:**
-
-1. **Candidate Fetching:**
-
-   - Fetches top K ticket candidates from `find_cross_channel_ticket_candidates` RPC (vector search on ticket embeddings, default top 15)
-   - Fetches top K message candidates from `find_cross_channel_message_candidates` RPC (vector search on message embeddings, default top 25)
-   - Also checks canonical key match if not already found in Step 2
-   - Deduplicates candidates by ticket ID (keeps best distance per ticket)
-
-2. **Filtering:**
-
-   - Skips closed tickets
-   - Skips same-channel tickets (already handled in Step 3.5)
-   - Only processes open tickets from other channels
-
-3. **Scoring:**
-
-   - Uses CCR-specific scoring formula: `semanticSim * 0.55 + categoryBonus + overlapBonus + recencyBonus`
-   - Category bonus: +0.15 if same category, +0.10 if compatible, 0 if incompatible
-   - Overlap bonus: +0.05 per overlapping signal (max +0.20)
-   - Recency bonus: +0.10 if updated within 24h, +0.05 if within 7d, 0 otherwise
-   - Score range: 0-1 (higher = better match)
-
-4. **Guardrails:**
-
-   - **Topic guard:** Blocks merge if distance > 0.50 AND overlap = 0 (message is about different topic)
-   - **Rare token list:** Identifies strong evidence (specific terms like "budget", "csv", "rbac", "403", "superadmin")
-   - Blocks merge only when evidence is weak (no overlap, high distance, no rare tokens)
-
-5. **Decision Rules:**
-
-   - Merge if score >= `SCORE_THRESHOLD` (default 0.75)
-   - Merge if overlapCount >= 2 AND distance <= 0.45 AND score >= 0.65 (strong signal overlap)
-   - If score is in gray-zone (close to threshold), performs LLM merge check using `checkCCRLLMMerge`
-   - LLM check is more conservative for cross-channel merges (requires confidence >= 0.7)
-
-6. **Logging:**
-   - Logs top 5 CCR candidates with scores, distances, overlaps, and channel IDs
-   - Logs guardrail decisions and LLM outcomes
-
-**Configuration:**
-
-- `CROSS_CHANNEL_DAYS`: Days to look back (default 14)
-- `MATCH_TOPK_TICKETS`: Number of ticket candidates (default 15)
-- `MATCH_TOPK_MESSAGES`: Number of message candidates (default 25)
-
-**If match found:** Attach message to that ticket, refresh summary → **Done**
+- Union of top **15 tickets** and **25 messages** by vector search (prefer **summary_embedding**). Thread candidate included with sameThread bonus. Signals normalized (synonym map). Guardrails and optional LLM gray-zone check. Irrelevant messages follow the same context-only rules.
 
 #### Step 4: Create New Ticket
 
-- If no match found in any step, create a new ticket with:
-  - Title from AI classification's `short_title`
-  - Category from classification
-  - AI-generated summary with description, action items, technical details, and priority hint
-  - The message's embedding stored for future similarity matching
-- Attach the message to the new ticket → **Done**
+- No match in 1–3.6 → create new ticket.
 
-#### FDE Message Handling
-
-Messages from the FDE user (defined by `FDE_USER_ID`) follow the same matching steps, but:
-
-- Can **attach to existing tickets** (Steps 1-3.6) to add context
-- **Cannot create new tickets** (Step 4 is skipped) - if no match is found, the message is not stored
-
-#### Context-Only Updates
-
-- If a message is classified as `is_relevant: false` (irrelevant), the system still attempts to attach it to an existing ticket using the same grouping steps (1-3.6)
-- If attachment succeeds, the message is stored with `is_context_only: true` flag
-- If attachment fails, the message is skipped (not stored)
-- This allows irrelevant messages that provide context (e.g., "thanks", "got it") to be attached to tickets without creating noise
-
-#### Summary Refresh on Attach
-
-Whenever a message is attached to an existing ticket, the ticket's summary is regenerated from the full conversation:
-
-- All messages in the ticket are passed to the AI summarizer
-- The summary, action items, and technical details are updated
-- **Priority is escalated** if newer messages indicate higher urgency (e.g., "by tonight", "ASAP", "critical")
-- **Category escalation**: If the new message's category has higher precedence than the ticket's current category, the ticket category is updated. Precedence order: `bug_report` > `feature_request` > `support_question` > `product_question`. This ensures tickets reflect the most urgent/actionable category.
-
-### Cross-Channel Grouping
-
-- **Entity-based canonical keys:** Work globally across channels (not limited to same channel). Messages with the same entity fingerprint (e.g., "csv|export|feature_export") are grouped together regardless of channel.
-- **Cross-Channel Context Retrieval (CCR):** Step 3.6 enables grouping related issues across multiple channels and longer time windows (days instead of minutes) using DB retrieval (vector search + signals) rather than strict time windows.
-- **Evidence-based guardrails:** Prevent over-merging for broad topic matches with weak evidence. Uses rare token list to identify strong evidence (specific terms like "budget", "csv", "rbac", "403") and blocks merges only when evidence is weak (no overlap, high distance, no rare tokens).
-- **Cross-channel context for classification:** DB RAG retrieves similar tickets/messages from other channels before classification to help classify vague updates.
-
-### Deduplication
-
-- **Messages:** UNIQUE on `(slack_channel_id, slack_ts)`.
-- **Tickets:** Partial unique index on `canonical_key WHERE status='open'`. On insert conflict, fetch existing ticket and attach message.
-
-### Message Edits
-
-- Only normal new messages are processed by default (subtypes ignored). Optional: handle `message_changed` to update existing message row; never create new tickets from edits.
-
-### Real-Time Updates
-
-- **Socket.IO events:** Backend emits `ticket_updated` event after every message attach (from `group.ts` pipeline) and when tickets are resolved/updated (from API routes)
-- **Dashboard refetch:** Frontend subscribes to `ticket_updated` events and automatically refetches the ticket list
-- **Reconnect handling:** Dashboard also refetches on socket connect/reconnect to ensure no updates are missed after disconnections
-- **Per-message emission:** Every time a message is attached to a ticket (Steps 1-3.6), the backend emits `ticket_updated` with the ticket ID, ensuring the dashboard stays in sync
-
-### Performance
-
-- Classification cache (1h TTL, keyed by normalized text, skipped when context is present); p-limit (default 3) on OpenAI calls; Slack events acked immediately; no polling (Socket.IO only).
-- Channel context fetching: Each non-thread message makes one additional Slack API call (`conversations.history`) to fetch recent messages. Consider caching channel history per channel for a short window if rate limits become an issue.
-- **Per-channel message queue:** Messages from the same channel are processed sequentially to prevent race conditions. Messages from different channels can still process in parallel.
-- **Scored matching:** Fetches top 5 candidates from vector search, scores each with multi-factor approach, applies guardrails, and optionally uses LLM for gray-zone cases. This is more robust than single-threshold matching but adds minimal overhead (typically 1-2 additional DB queries per message).
-- **Cross-Channel Context Retrieval (CCR):** Step 3.6 fetches candidates from ticket and message vector search across channels (top 15 tickets, top 25 messages), scores each with CCR-specific formula, applies evidence-based guardrails, and optionally uses LLM for gray-zone cases. Adds 2-3 additional DB queries per message but enables grouping across channels and longer time windows (days instead of minutes).
-
-### Security
-
-- Service role key server-side only; CORS restricted to `APP_ORIGIN`.
-
-### AI Usage
-
-- **Classification** (`gpt-4o-mini` with Structured Outputs):
-  - Thread context (for thread replies): Previous messages in the same Slack thread
-  - Channel context (for non-thread messages): Last N channel messages (default 15, configurable via `CHANNEL_CONTEXT_LIMIT`) to detect indirect references
-  - **Cross-channel context (DB RAG):** Before classification, retrieves top 3 similar open tickets and top 5 similar messages from other channels (within `CROSS_CHANNEL_DAYS`) to help classify vague updates. This context is included in the classification prompt to improve accuracy.
-  - The prompt looks for pronouns ("it", "that", "this") that may refer to features/issues mentioned in context
-  - Generates **specific, descriptive titles** incorporating context (e.g., "User cannot find CSV export button" vs generic "User cannot find button") to improve semantic grouping
-- **Embeddings** (`text-embedding-3-small`, 1536 dimensions):
-  - **Enhanced embedding text** includes category, short_title, signals, and original message for better semantic stability
-  - **Scored matching** (industry-standard): Combines semantic similarity (60%) with structural signals (category compatibility as soft signal, channel match, recency, signal overlap)
-  - Score thresholds: `SCORE_THRESHOLD` (default 0.75) for Step 3, `RECENT_CHANNEL_SCORE_THRESHOLD` (default 0.65) for Step 3.5
-  - **Evidence-based guardrails**: Only block merges when categories are incompatible AND evidence is weak (high distance, no overlap, not same thread/channel). Compatible categories (e.g., feature_request + support_question) merge naturally.
-  - **Gray-zone LLM check**: Optional `gpt-4o-mini` call when score is close to threshold (or when categories differ) to verify if messages refer to the same underlying issue
-  - Supabase returns vector columns as strings; the backend parses them to arrays automatically
-- **Summarization** (`gpt-4o-mini`):
-  - Generates description, action items, technical details, and priority hint
-  - When messages are grouped, the summary is regenerated from the full conversation
-  - **Priority escalation:** If newer messages indicate higher urgency ("by tonight", "ASAP", "critical"), priority is automatically raised
+**Summary embeddings:** Tickets store **summary_embedding** (title + category + summary + signals) and use it for matching when present, improving cross-conversation accuracy over the initial-message embedding alone.
 
 ---
 
 ## Dashboard Features
 
-### Ticket List
+### Pages and routes
 
-- **Full-width search bar** with instant filtering by ticket title
-- **Filters panel** (expandable with smooth animation):
-  - Date: All time, Last 7/30/90 days
-  - Category: Bug report, Support question, Feature request, Product question
-  - Priority: Critical, High, Medium, Low
-  - Status: Open, Resolved, Closed
-- **Priority badges** on ticket cards (color-coded: Critical=red, High=amber, Medium=blue, Low=gray)
-- **Real-time updates** via Socket.IO when tickets are created, updated, or resolved
-- **Automatic refetch** on socket connect/reconnect to ensure dashboard stays in sync even after disconnections
-- **Live updates** whenever a new message is added to any ticket (backend emits `ticket_updated` event after every message attach)
+| Route                | Description                                                                                                                                                                                 |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/dashboard`         | **Dashboard** – Overview with stats cards and a ticket list (compact cards). Same search bar and filters (Date, Category, Priority, Status). Dynamic section title based on active filters. |
+| `/dashboard/tickets` | **Tickets** – Tickets-only view with the same search bar and filters. Taller ticket cards showing **Reported by**, **Messages** count, and reporter icon.                                   |
+| `/tickets/[id]`      | **Ticket detail** – Single ticket with message timeline. Back arrow returns to Dashboard or Tickets depending on where the ticket was opened (`?from=dashboard` or `?from=tickets`).        |
 
-### Ticket Detail Page
+### Ticket list (Dashboard and Tickets tab)
 
-- Full ticket information: title, category, status, priority, dates, reporter, assignees
-- AI-generated summary with description, action items, and technical details
-- Message timeline showing all grouped messages
-- **Resolve/Reopen button** to change ticket status (persisted to DB, broadcasts update via socket)
+- **Search bar** – Full-width search with the same design on both Dashboard and Tickets.
+- **Filters** – Date, Category, Priority, Status (custom dropdowns; overlay when open). Active filter count shown on the Filters button.
+- **Real-time updates** – Socket.IO pushes new/updated tickets without refresh.
+- **No loading indicator** – Initial load and refetches do not show a "Loading..." message next to the tickets.
 
 ### Sidebar
 
-- Fixed position sidebar that remains stable during content changes
-- User profile section with sign-out functionality
+- **Dashboard** – Overview (stats + tickets).
+- **Tickets** – Tickets-only list.
+- **Profile** – User profile (and Sign out in the user menu at the bottom).
+
+### API (backend and web proxy)
+
+**Backend** (http://localhost:4000):
+
+| Method | Path               | Description                                                                                            |
+| ------ | ------------------ | ------------------------------------------------------------------------------------------------------ |
+| GET    | `/api/tickets`     | List tickets (optional `?status=open`, `closed`, or `resolved`). Each ticket includes `message_count`. |
+| GET    | `/api/tickets/:id` | Single ticket with messages (channel/workspace names resolved when available).                         |
+| PATCH  | `/api/tickets/:id` | Update ticket (e.g. body `{ "status": "resolved" }`).                                                  |
+| DELETE | `/api/tickets/:id` | Delete a ticket.                                                                                       |
+
+**Web app** (Next.js proxies to backend): `GET /api/tickets`, `GET /api/tickets/[id]`, `DELETE /api/tickets/[id]`.
 
 ---
 
 ## Troubleshooting
 
-### Bot not receiving events
-
-- Socket Mode enabled; app-level token has `connections:write`; `SLACK_APP_TOKEN` correct in `.env`; app installed and bot invited to channel; Event Subscriptions include `message.channels` (and `message.groups` if using private channels).
-
-### Missing scopes
-
-- Add required Bot Token Scopes in OAuth & Permissions; reinstall app to workspace.
-
-### Socket / dashboard not updating
-
-- `NEXT_PUBLIC_SOCKET_URL` and `NEXT_PUBLIC_API_URL` point to backend (e.g. `http://localhost:4000`); backend running; CORS allows `APP_ORIGIN`.
-
-### Database errors
-
-- Re-run migration SQL in Supabase SQL Editor in order (001 → 005 → 006 → 007); confirm `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` in `.env`.
-- If you see "column t.embedding must appear in the GROUP BY clause" error, ensure migration `007_cross_channel_context.sql` has been applied (the function `get_ticket_context_for_classification` uses subqueries to avoid this error).
-
-### OpenAI errors
-
-- Valid `OPENAI_API_KEY`; access to `gpt-4o-mini` and `text-embedding-3-small`; check [OpenAI status](https://status.openai.com) and usage.
-
-### Port already in use
-
-- Change `PORT` in `.env` (e.g. `4001`) and set `NEXT_PUBLIC_SOCKET_URL` and `NEXT_PUBLIC_API_URL` to the same URL and port.
-
----
-
-## API Endpoints
-
-### Backend API (`http://localhost:4000`)
-
-- **GET `/health`** - Health check endpoint
-- **GET `/api/tickets`** - Get all tickets (optional query: `?status=open|resolved|closed`)
-- **GET `/api/tickets/:id`** - Get a specific ticket by ID
-- **PATCH `/api/tickets/:id`** - Update ticket (e.g., resolve: `{ "status": "resolved" }`)
-- **DELETE `/api/tickets/:id`** - Delete a ticket
-- **POST `/dev/ingest`** - Development endpoint to ingest test messages (bypasses Slack)
-
-### Frontend API Routes (`http://localhost:3000/api`)
-
-- **GET `/api/tickets`** - Proxy to backend `/api/tickets`
-- **GET `/api/tickets/[id]`** - Proxy to backend `/api/tickets/:id`
-
-### Socket.IO Events
-
-- **`ticket_updated`** - Emitted by backend when a ticket is created, updated, or a message is attached
-  - Payload: `{ ticketId: string }`
-  - Frontend subscribes to this event and refetches the ticket list
-
-## Development
-
-### Project Structure
-
-```
-nixo-slackbot/
-├── apps/
-│   ├── backend/     # Express + Socket.IO + Slack Bolt
-│   │   └── src/
-│   │       ├── index.ts          # Main server entry point
-│   │       ├── slack/             # Slack Bolt integration
-│   │       ├── pipeline/          # Message processing pipeline
-│   │       ├── db/                # Supabase database queries
-│   │       ├── api/               # REST API routes
-│   │       └── socket/             # Socket.IO event handlers
-│   └── web/         # Next.js dashboard
-│       └── src/
-│           ├── app/               # Next.js App Router pages
-│           ├── components/       # React components
-│           ├── hooks/             # React hooks
-│           └── lib/               # Utility functions
-├── packages/
-│   └── shared/      # Shared types and Zod schemas
-│       └── src/
-│           ├── types.ts          # TypeScript type definitions
-│           └── schemas.ts         # Zod validation schemas
-├── supabase/
-│   └── migrations/  # Database migrations
-│       ├── 001_initial_schema.sql      # Core schema (tickets, messages, embeddings)
-│       ├── 005_messages_update_trigger.sql  # Message update trigger
-│       ├── 006_scored_matching.sql     # Scored matching functions
-│       └── 007_cross_channel_context.sql  # Cross-channel context RPCs and is_context_only column
-├── scripts/
-│   ├── test-scenarios.ts    # TypeScript test scenarios script
-│   ├── test-scenarios.ps1   # PowerShell test scenarios script (Windows)
-│   └── test-scenarios.sh   # Bash test scenarios script (Linux/Mac)
-├── .env.example      # Environment variables template
-├── requirements.txt   # All dependencies reference
-└── venv/             # Python virtual environment (optional)
-```
-
-### Dependencies
-
-All dependencies are listed in `requirements.txt`. Install with `pnpm install` from the root; both backend and frontend read env from the single root `.env` (frontend only uses `NEXT_PUBLIC_*` in the browser).
-
-### Python Virtual Environment (Optional)
-
-Only needed if you add Python tooling. `venv` is built-in (Python 3.3+).
-
-```bash
-python -m venv venv
-# Windows: venv\Scripts\Activate.ps1  or  venv\Scripts\activate.bat
-# macOS/Linux: source venv/bin/activate
-deactivate   # when done
-```
-
-**Note:** The root `requirements.txt` is for **Node.js/pnpm only** (reference). Do not run `pip install -r requirements.txt`—it will fail. If you add Python dependencies, create a separate file (e.g. `requirements-py.txt`) and use `pip install -r requirements-py.txt`.
-
-`venv/` is in `.gitignore`. On Windows execution policy errors: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`.
-
-### Testing without Slack
-
-**Single message:**
-
-```bash
-curl -X POST http://localhost:4000/dev/ingest \
-  -H "Content-Type: application/json" \
-  -d '{
-    "channel": "C1234567890",
-    "ts": "1234567890.123456",
-    "user": "U9876543210",
-    "text": "I found a bug in the API"
-  }'
-```
+- **Bot not receiving events**: Check Socket Mode and `message.channels` scope.
+- **Missing scopes**: Reinstall app after adding `channels:history`.
+- **Dashboard blank**: Ensure you are at `/dashboard` or `/dashboard/tickets` and the backend is running.
+- **Database errors**: Check `SUPABASE_URL` and run migrations in order.
 
 ---
 

@@ -12,10 +12,11 @@ import {
   findCrossChannelTicketCandidates,
   type TicketCandidate,
 } from '../db/tickets';
-import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates, findCrossChannelMessageCandidates } from '../db/messages';
-import { normalizeMessage, computeCanonicalKey } from './normalize';
+import { upsertMessage, findSimilarMessage, getMessagesByTicketId, findSimilarMessagesCandidates, findCrossChannelMessageCandidates, getRecentVisibleMessages } from '../db/messages';
+import { normalizeMessage, computeCanonicalKey, computeIntentFingerprint, type IntentFingerprint } from './normalize';
+import type { MessageInsert } from '../db/messages';
 import { openaiLimiter } from './limiter';
-import { generateTicketSummary, generateTicketSummaryFromConversation } from './summarize';
+import { generateTicketSummary, generateTicketSummaryFromConversation, computeSummaryEmbedding } from './summarize';
 import { emitTicketUpdated } from '../socket/events';
 
 const SIMILARITY_DAYS_BACK = parseInt(process.env.SIMILARITY_DAYS_BACK || '14', 10);
@@ -35,6 +36,15 @@ const SIMILARITY_GRAYZONE_HIGH = parseFloat(process.env.SIMILARITY_GRAYZONE_HIGH
 const CROSS_CHANNEL_DAYS = parseInt(process.env.CROSS_CHANNEL_DAYS || '14', 10);
 const MATCH_TOPK_TICKETS = parseInt(process.env.MATCH_TOPK_TICKETS || '15', 10);
 const MATCH_TOPK_MESSAGES = parseInt(process.env.MATCH_TOPK_MESSAGES || '25', 10);
+
+// Thread matching configuration
+const SAME_THREAD_BONUS = parseFloat(process.env.SAME_THREAD_BONUS || '0.12');
+const THREAD_IRRELEVANT_BLOCK = process.env.THREAD_IRRELEVANT_BLOCK !== 'false'; // Default true
+const THREAD_CONTEXT_ONLY_MIN_SCORE = parseFloat(process.env.THREAD_CONTEXT_ONLY_MIN_SCORE || '0.60');
+
+// Redundancy detection configuration
+const REDUNDANT_DISTANCE_THRESHOLD = parseFloat(process.env.REDUNDANT_DISTANCE_THRESHOLD || '0.18');
+const REDUNDANT_LOOKBACK = parseInt(process.env.REDUNDANT_LOOKBACK || '20', 10);
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -63,6 +73,176 @@ function cosineDistance(a: number[], b: number[]): number {
   const cosineSimilarity = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   // Cosine distance = 1 - cosine similarity
   return 1 - cosineSimilarity;
+}
+
+/**
+ * Insert message with redundancy check and summary refresh logic.
+ * Handles redundancy detection, message insertion, and conditional summary refresh.
+ */
+async function insertMessageWithRedundancyCheck(
+  ticketId: string,
+  messageData: Omit<MessageInsert, 'ticket_id'>,
+  embedding: number[] | null,
+  classification: ClassificationResult,
+  skipSummaryRefresh: boolean = false
+): Promise<void> {
+  // Compute intent fingerprint
+  const normalized = normalizeMessage(messageData.text);
+  const intentFingerprint = computeIntentFingerprint(messageData.text, normalized.signals);
+
+  // Check redundancy (only if we have an embedding and intent_key)
+  let isRedundant = false;
+  let redundantOfMessageId: string | null = null;
+
+  if (embedding && intentFingerprint.intent_key) {
+    const redundancyCheck = await checkRedundancy(
+      ticketId,
+      messageData,
+      embedding,
+      intentFingerprint,
+      classification
+    );
+    isRedundant = redundancyCheck.isRedundant;
+    redundantOfMessageId = redundancyCheck.redundantOfMessageId;
+  }
+
+  // Insert message with redundancy metadata
+  await upsertMessage({
+    ...messageData,
+    ticket_id: ticketId,
+    embedding: embedding ?? null,
+    is_redundant: isRedundant,
+    redundant_of_message_id: redundantOfMessageId,
+    intent_key: intentFingerprint.intent_key,
+    intent_object: intentFingerprint.intent_object,
+    intent_action: intentFingerprint.intent_action,
+    intent_value: intentFingerprint.intent_value,
+    // If redundant, also mark as context-only
+    is_context_only: messageData.is_context_only || isRedundant,
+  });
+
+  // Skip summary refresh if redundant or explicitly requested
+  if (!isRedundant && !skipSummaryRefresh) {
+    await refreshTicketSummary(ticketId, classification, messageData);
+  }
+}
+
+/**
+ * Check if incoming message is redundant (repeats same intent as prior message).
+ * Returns redundancy status and reference to original message if redundant.
+ */
+async function checkRedundancy(
+  ticketId: string,
+  incomingMessage: Omit<MessageInsert, 'ticket_id'>,
+  incomingEmbedding: number[],
+  intentFingerprint: IntentFingerprint,
+  classification: ClassificationResult
+): Promise<{ isRedundant: boolean; redundantOfMessageId: string | null }> {
+  // If no intent_key, cannot determine redundancy
+  if (!intentFingerprint.intent_key) {
+    return { isRedundant: false, redundantOfMessageId: null };
+  }
+
+  // Fetch recent visible messages
+  const recentMessages = await getRecentVisibleMessages(ticketId, REDUNDANT_LOOKBACK);
+  
+  if (recentMessages.length === 0) {
+    return { isRedundant: false, redundantOfMessageId: null };
+  }
+
+  // Check each prior message for matching intent_key
+  for (const priorMessage of recentMessages) {
+    const priorIntentKey = (priorMessage as any).intent_key;
+    if (!priorIntentKey || priorIntentKey !== intentFingerprint.intent_key) {
+      continue;
+    }
+
+    // Compute semantic distance if both have embeddings
+    const priorEmbedding = (priorMessage as any).embedding;
+    if (priorEmbedding && incomingEmbedding && 
+        Array.isArray(priorEmbedding) && Array.isArray(incomingEmbedding) &&
+        priorEmbedding.length === incomingEmbedding.length) {
+      const distance = cosineDistance(incomingEmbedding, priorEmbedding);
+      
+      if (distance > REDUNDANT_DISTANCE_THRESHOLD) {
+        continue; // Too different semantically
+      }
+
+      // Check "adds new info" override
+      const addsNewInfo = checkAddsNewInfo(
+        incomingMessage.text,
+        classification.signals,
+        intentFingerprint,
+        priorMessage
+      );
+
+      if (addsNewInfo) {
+        console.log(`[Group] Message not redundant: adds new information (intent_key=${intentFingerprint.intent_key})`);
+        continue;
+      }
+
+      // Mark as redundant
+      console.log(`[Group] Marking message as redundant: intent_key=${intentFingerprint.intent_key}, redundant_of=${priorMessage.id}, distance=${distance.toFixed(3)}`);
+      return { isRedundant: true, redundantOfMessageId: priorMessage.id };
+    }
+  }
+
+  return { isRedundant: false, redundantOfMessageId: null };
+}
+
+/**
+ * Check if message adds new information that prevents redundancy.
+ * Returns true if message should NOT be marked redundant despite matching intent_key.
+ */
+function checkAddsNewInfo(
+  incomingText: string,
+  incomingSignals: string[],
+  intentFingerprint: IntentFingerprint,
+  priorMessage: { text: string; intent_value?: string | null }
+): boolean {
+  const normalizedText = incomingText.toLowerCase();
+
+  // Check for new platform
+  const platformKeywords: string[] = ['ios', 'android', 'web', 'mobile', 'desktop'];
+  const hasNewPlatform = platformKeywords.some((platform: string) => 
+    normalizedText.includes(platform) && 
+    !priorMessage.text.toLowerCase().includes(platform)
+  );
+  if (hasNewPlatform) {
+    return true;
+  }
+
+  // Check for error codes/endpoints
+  const errorCodePattern = /\b(\d{3,4}|ERR[_\-]?\w+)\b/gi;
+  const incomingCodes: string[] = (incomingText.match(errorCodePattern) || []) as string[];
+  const priorCodes: string[] = (priorMessage.text.match(errorCodePattern) || []) as string[];
+  const hasNewErrorCode = incomingCodes.some((code: string) => !priorCodes.includes(code));
+  if (hasNewErrorCode) {
+    return true;
+  }
+
+  const endpointPattern = /\/(?:v\d+|api|auth)\/[\w\/\-]+/gi;
+  const incomingEndpoints: string[] = (incomingText.match(endpointPattern) || []) as string[];
+  const priorEndpoints: string[] = (priorMessage.text.match(endpointPattern) || []) as string[];
+  const hasNewEndpoint = incomingEndpoints.some((endpoint: string) => !priorEndpoints.includes(endpoint));
+  if (hasNewEndpoint) {
+    return true;
+  }
+
+  // Check for urgency/deadline words
+  const urgencyWords = ['asap', 'as soon as possible', 'tonight', 'today', 'urgent', 'critical', 'immediately', 'now'];
+  const hasUrgency = urgencyWords.some(word => normalizedText.includes(word));
+  if (hasUrgency) {
+    return true;
+  }
+
+  // Check if intent_value changed (e.g., blue -> red)
+  if (intentFingerprint.intent_value && priorMessage.intent_value &&
+      intentFingerprint.intent_value !== priorMessage.intent_value) {
+    return true;
+  }
+
+  return false;
 }
 
 /**
@@ -259,6 +439,9 @@ function applyGuardrails(params: {
   sameChannel: boolean;
   minutesSinceTicketUpdate: number;
   sameThread: boolean;
+  isRelevant?: boolean;
+  isFiller?: boolean;
+  isStatusUpdate?: boolean;
 }): boolean {
   const {
     categoryCompatible,
@@ -267,11 +450,20 @@ function applyGuardrails(params: {
     sameChannel,
     minutesSinceTicketUpdate,
     sameThread,
+    isRelevant = true,
+    isFiller = false,
+    isStatusUpdate: isStatus = false,
   } = params;
 
+  // Hard block for irrelevant filler in-thread messages
+  if (!isRelevant && isFiller && overlapCount === 0 && !isStatus && THREAD_IRRELEVANT_BLOCK) {
+    console.log('[Group] Guardrail: Blocking irrelevant filler message even if sameThread');
+    return false; // Block irrelevant filler
+  }
+
   // Strong evidence overrides incompatibility (even if categories are incompatible)
-  if (sameThread) {
-    return true; // Same thread is strongest evidence
+  if (sameThread && (isRelevant || overlapCount >= 1 || isStatus || distance <= 0.30)) {
+    return true; // Same thread with evidence
   }
   if (overlapCount >= 2 && distance <= 0.30) {
     return true; // High overlap + low distance
@@ -442,8 +634,9 @@ function computeCCRMatchScore(params: {
   categoryCompatibility: { compatible: boolean; isSometimesCompatible: boolean };
   overlapCount: number;
   updatedAt: string; // ISO timestamp
+  sameThread: boolean;
 }): MatchScoreResult {
-  const { distance, sameCategory, categoryCompatibility, overlapCount, updatedAt } = params;
+  const { distance, sameCategory, categoryCompatibility, overlapCount, updatedAt, sameThread } = params;
 
   // Base semantic similarity score (clamped to [0, 1])
   const semanticSim = Math.max(0, Math.min(1, 1 - distance / 2));
@@ -470,6 +663,11 @@ function computeCCRMatchScore(params: {
   const hoursSinceUpdate = (now - updatedTime) / (1000 * 60 * 60);
   if (hoursSinceUpdate <= 24) {
     score += 0.05;
+  }
+
+  // Same thread bonus (smaller in CCR since it's cross-channel)
+  if (sameThread) {
+    score += Math.min(SAME_THREAD_BONUS, 0.08);
   }
 
   // Clamp to [0, 1]
@@ -672,6 +870,79 @@ export interface MessageData {
 }
 
 /**
+ * Check if a message is filler (acknowledgements, greetings, etc.).
+ * Returns true if message matches filler patterns.
+ */
+function isFillerMessage(text: string): boolean {
+  const normalized = text.toLowerCase().trim();
+  
+  // Filler patterns
+  const fillerPatterns = [
+    'thanks',
+    'thank you',
+    'ok',
+    'okay',
+    'cool',
+    'lol',
+    'great',
+    'sounds good',
+    '👍',
+    'hi',
+    'hello',
+    'hey',
+    'dinner',
+    'lunch',
+    'see you',
+    'bye',
+  ];
+  
+  // Check if message matches filler patterns
+  for (const pattern of fillerPatterns) {
+    if (normalized === pattern || normalized.startsWith(pattern + ' ') || normalized.endsWith(' ' + pattern)) {
+      return true;
+    }
+  }
+  
+  // Single emoji or very short messages (<4 chars) unless it's a status update
+  if (normalized.length < 4 && !isStatusUpdate(text)) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Check if a message matches status-update patterns.
+ * Returns true if message contains status update keywords.
+ */
+function isStatusUpdate(text: string): boolean {
+  const normalized = text.toLowerCase();
+  const statusPatterns = [
+    'on it',
+    'investigating',
+    'fixed',
+    'resolved',
+    'deployed',
+    'rollback',
+    'eta',
+    'repro',
+    'reproduced',
+    'blocked',
+    'working on',
+    'looking into',
+    'checking',
+  ];
+  
+  for (const pattern of statusPatterns) {
+    if (normalized.includes(pattern)) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
+/**
  * Get category precedence for escalation.
  * Higher precedence categories are more urgent/actionable.
  */
@@ -689,6 +960,7 @@ function getCategoryPrecedence(category: string): number {
 /**
  * Refresh ticket summary and optionally merge assignees when a new message is attached.
  * Also escalates ticket category if new message has higher precedence.
+ * Computes and stores summary_embedding when summary changes.
  */
 async function refreshTicketSummary(
   ticketId: string,
@@ -699,10 +971,17 @@ async function refreshTicketSummary(
     const ticket = await getTicket(ticketId);
     if (!ticket || !ticket.messages.length) return;
 
-    const messages = ticket.messages.map((m) => ({
-      text: m.text,
-      username: m.slack_username || null,
-    }));
+    // Filter messages: exclude filler, include status updates and technical details
+    const messages = ticket.messages
+      .filter((m) => {
+        // Include all messages for now (filler detection will be added later)
+        // For now, we include all messages to maintain context
+        return true;
+      })
+      .map((m) => ({
+        text: m.text,
+        username: m.slack_username || null,
+      }));
 
     const existingAssignees = ticket.assignees || [];
     const newInferred = latestClassification.inferred_assignees || [];
@@ -730,6 +1009,9 @@ async function refreshTicketSummary(
       reporterUsername: ticket.reporter_username || null,
     });
 
+    // Check if summary description changed (to avoid unnecessary embedding computation)
+    const summaryChanged = !ticket.summary || ticket.summary.description !== summary.description;
+
     const updateData: Partial<Ticket> = {
       summary,
       assignees: mergedAssignees,
@@ -738,6 +1020,21 @@ async function refreshTicketSummary(
     // Update category if escalated
     if (updatedCategory !== ticket.category) {
       updateData.category = updatedCategory;
+    }
+
+    // Compute summary_embedding only if summary changed
+    if (summaryChanged) {
+      const ticketSignals = extractTicketSignals(ticket.messages.map((m) => ({ text: m.text })));
+      const summaryEmbedding = await computeSummaryEmbedding({
+        title: ticket.title,
+        category: updatedCategory,
+        summary,
+        signals: ticketSignals,
+      });
+      if (summaryEmbedding) {
+        updateData.summary_embedding = summaryEmbedding;
+        console.log('[Group] Computed summary_embedding for ticket:', ticketId);
+      }
     }
 
     await updateTicket(ticketId, updateData);
@@ -760,43 +1057,77 @@ export async function groupMessage(
 ): Promise<string | null> {
   const isFde = options?.is_fde ?? false;
   const isContextOnly = options?.is_context_only ?? false;
-  // Step 1: Check thread grouping
+  
+  // Step 1: Thread candidate boost (no longer unconditional attach)
+  // If root_thread_ts matches an open ticket, that ticket becomes a high-priority candidate
+  // with sameThread flag, but still goes through scoring pipeline
   console.log('[Group] Step 1: Checking thread grouping for root_thread_ts:', messageData.root_thread_ts);
+  let threadCandidate: TicketCandidate | null = null;
   const threadTicket = await findTicketByRootThreadTs(messageData.root_thread_ts);
   if (threadTicket) {
-    console.log('[Group] Found existing ticket via thread:', threadTicket.id, isFde ? '(FDE adding context)' : '');
-    await upsertMessage({
-      ...messageData,
-      ticket_id: threadTicket.id,
+    console.log('[Group] Found thread ticket candidate:', threadTicket.id, '- will be scored with sameThread bonus');
+    // Compute distance for thread candidate
+    const textToEmbed = `${classification.category}: ${classification.short_title}\nSignals: ${classification.signals.join(' ')}\nMessage: ${messageData.text}`.substring(0, 2000);
+    const embedding = await openaiLimiter(async () => {
+      const response = await openai.embeddings.create({
+        model: 'text-embedding-3-small',
+        input: textToEmbed,
+      });
+      return response.data[0].embedding;
     });
-    await refreshTicketSummary(threadTicket.id, classification, messageData);
-    emitTicketUpdated(threadTicket.id);
-    return threadTicket.id;
+    
+    // Use summary_embedding if available, fallback to embedding
+    const ticketEmb = threadTicket.summary_embedding || threadTicket.embedding;
+    if (ticketEmb && Array.isArray(ticketEmb) && ticketEmb.length === embedding.length) {
+      const distance = cosineDistance(embedding, ticketEmb);
+      const ticketMessages = await getMessagesByTicketId(threadTicket.id);
+      const ticketChannelId = ticketMessages.length > 0 ? ticketMessages[0].slack_channel_id : undefined;
+      threadCandidate = {
+        ticketId: threadTicket.id,
+        distance,
+        category: threadTicket.category,
+        updatedAt: threadTicket.updated_at,
+        canonicalKey: threadTicket.canonical_key,
+        ...(ticketChannelId && { slackChannelId: ticketChannelId }),
+      };
+    }
   }
 
   // Step 2: Compute entity-based canonical_key and check for match (works globally across channels)
   console.log('[Group] Step 2: Computing entity-based canonical key...');
-  const normalized = normalizeMessage(messageData.text);
+  const normalizedStep2 = normalizeMessage(messageData.text);
   // Use entity-based canonical key from signals
-  const canonicalKey = computeCanonicalKey(normalized.signals) || 
-    normalized.normalizedText
+  const canonicalKey = computeCanonicalKey(normalizedStep2.signals, messageData.text) || 
+    normalizedStep2.normalizedText
       .substring(0, 50)
       .replace(/[^a-z0-9]/g, '_')
       .replace(/_+/g, '_')
       .replace(/^_|_$/g, '');
 
-  console.log('[Group] Canonical key:', canonicalKey, 'signals:', normalized.signals);
+  console.log('[Group] Canonical key:', canonicalKey, 'signals:', normalizedStep2.signals);
 
   if (canonicalKey) {
     const canonicalTicket = await findTicketByCanonicalKey(canonicalKey);
     if (canonicalTicket) {
       console.log('[Group] Found existing ticket via canonical key:', canonicalTicket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
-      await upsertMessage({
-        ...messageData,
-        ticket_id: canonicalTicket.id,
-        is_context_only: isContextOnly,
+      // Compute embedding for redundancy check (embedding will be computed in Step 3, but we need it here for redundancy check)
+      const signalsText = classification.signals.length > 0 
+        ? classification.signals.join(' ')
+        : '';
+      const textToEmbed = `${classification.category}: ${classification.short_title}\nSignals: ${signalsText}\nMessage: ${messageData.text}`.substring(0, 2000);
+      const embedding = await openaiLimiter(async () => {
+        const response = await openai.embeddings.create({
+          model: 'text-embedding-3-small',
+          input: textToEmbed,
+        });
+        return response.data[0].embedding;
       });
-      await refreshTicketSummary(canonicalTicket.id, classification, messageData);
+      await insertMessageWithRedundancyCheck(
+        canonicalTicket.id,
+        { ...messageData, is_context_only: isContextOnly },
+        embedding,
+        classification
+      );
       emitTicketUpdated(canonicalTicket.id);
       return canonicalTicket.id;
     }
@@ -816,6 +1147,24 @@ export async function groupMessage(
     });
     return response.data[0].embedding;
   });
+
+  // Compute distance for thread candidate if found
+  if (threadTicket && embedding) {
+    const ticketEmb = threadTicket.summary_embedding || threadTicket.embedding;
+    if (ticketEmb && Array.isArray(ticketEmb) && ticketEmb.length === embedding.length) {
+      const distance = cosineDistance(embedding, ticketEmb);
+      const ticketMessages = await getMessagesByTicketId(threadTicket.id);
+      const ticketChannelId = ticketMessages.length > 0 ? ticketMessages[0].slack_channel_id : undefined;
+      threadCandidate = {
+        ticketId: threadTicket.id,
+        distance,
+        category: threadTicket.category,
+        updatedAt: threadTicket.updated_at,
+        canonicalKey: threadTicket.canonical_key,
+        ...(ticketChannelId && { slackChannelId: ticketChannelId }),
+      };
+    }
+  }
 
   console.log('[Group] Searching for similar tickets (by ticket embedding)...');
   const similarTicket = await findSimilarTicket(embedding, SIMILARITY_DAYS_BACK, SIMILARITY_THRESHOLD);
@@ -865,9 +1214,13 @@ export async function groupMessage(
         ticketEmb.length === embedding.length;
 
       if (ticketEmb && embedding && sameDimension) {
-        // Compute distance
-        const distance = cosineDistance(embedding, ticketEmb);
+        // Use summary_embedding if available, fallback to embedding
+        const ticketEmbeddingToUse = ticket.summary_embedding || ticketEmb;
+        const distance = cosineDistance(embedding, ticketEmbeddingToUse);
         console.log('[Group] Recent ticket found, computing score...');
+
+        // Check if this is the thread candidate
+        const sameThread = threadCandidate && threadCandidate.ticketId === ticket.id;
 
         // Compute signal overlap
         const ticketSignals = extractTicketSignals(ticket.messages);
@@ -898,7 +1251,10 @@ export async function groupMessage(
           overlapCount,
           sameChannel,
           minutesSinceTicketUpdate: minutesSinceUpdate,
-          sameThread: false, // Step 3.5 is channel-based, not thread-based
+          sameThread: sameThread || false,
+          isRelevant: classification.is_relevant,
+          isFiller: isFillerMessage(messageData.text),
+          isStatusUpdate: isStatusUpdate(messageData.text),
         });
 
         if (!guardrailPassed) {
@@ -934,17 +1290,39 @@ export async function groupMessage(
             );
             // Continue to Step 4 to create new ticket
           } else if (scoreResult.score >= RECENT_CHANNEL_SCORE_THRESHOLD) {
-            // Check if score meets threshold
-            console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
-            await upsertMessage({
-              ...messageData,
-              ticket_id: ticket.id,
-              embedding,
-              is_context_only: isContextOnly,
-            });
-            await refreshTicketSummary(ticket.id, classification, messageData);
-            emitTicketUpdated(ticket.id);
-            return ticket.id;
+            // Check relevance policy for irrelevant messages
+            if (!classification.is_relevant) {
+              // Irrelevant messages: only attach if context-only rules pass
+              const canAttachAsContextOnly = 
+                scoreResult.score >= THREAD_CONTEXT_ONLY_MIN_SCORE &&
+                (overlapCount >= 1 || isStatusUpdate(messageData.text) || distance <= 0.30);
+              
+              if (!canAttachAsContextOnly) {
+                console.log('[Group] Irrelevant message does not meet context-only criteria, dropping:', messageData.text.substring(0, 50));
+                return null; // Drop irrelevant filler
+              }
+              // Attach as context-only
+              console.log('[Group] Recent ticket score meets threshold, merging message as context-only', ticket.id, isFde ? '(FDE adding context)' : '');
+              await insertMessageWithRedundancyCheck(
+                ticket.id,
+                { ...messageData, is_context_only: true },
+                embedding,
+                classification
+              );
+              emitTicketUpdated(ticket.id);
+              return ticket.id;
+            } else {
+              // Relevant messages: attach normally
+              console.log('[Group] Recent ticket score meets threshold, merging message', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
+              await insertMessageWithRedundancyCheck(
+                ticket.id,
+                { ...messageData, is_context_only: isContextOnly },
+                embedding,
+                classification
+              );
+              emitTicketUpdated(ticket.id);
+              return ticket.id;
+            }
           } else if (isGrayZone(scoreResult.score, RECENT_CHANNEL_SCORE_THRESHOLD, distance, sameCategory)) {
             // Check gray-zone for LLM merge check (only if topic guard didn't block)
             console.log('[Group] Recent ticket score in gray-zone, performing LLM merge check...');
@@ -962,12 +1340,12 @@ export async function groupMessage(
 
             if (llmResult.should_merge && llmResult.confidence >= 0.7) {
               console.log('[Group] LLM check approved merge for recent ticket', ticket.id, isFde ? '(FDE adding context)' : '');
-              await upsertMessage({
-                ...messageData,
-                ticket_id: ticket.id,
+              await insertMessageWithRedundancyCheck(
+                ticket.id,
+                { ...messageData, is_context_only: isContextOnly },
                 embedding,
-              });
-              await refreshTicketSummary(ticket.id, classification, messageData);
+                classification
+              );
               emitTicketUpdated(ticket.id);
               return ticket.id;
             } else {
@@ -985,13 +1363,12 @@ export async function groupMessage(
         // If ticket has no embedding, skip semantic check (attach anyway for backward compatibility)
         // This handles tickets created before embeddings were added
         console.log('[Group] Found recent ticket in same channel (no embedding to compare):', ticket.id, isFde ? '(FDE adding context)' : '', isContextOnly ? '(context-only)' : '');
-        await upsertMessage({
-          ...messageData,
-          ticket_id: ticket.id,
+        await insertMessageWithRedundancyCheck(
+          ticket.id,
+          { ...messageData, is_context_only: isContextOnly },
           embedding,
-          is_context_only: isContextOnly,
-        });
-        await refreshTicketSummary(ticket.id, classification, messageData);
+          classification
+        );
         emitTicketUpdated(ticket.id);
         return ticket.id;
       }
@@ -1018,8 +1395,8 @@ export async function groupMessage(
             c => c.ticketId === canonicalTicket.id
           );
           if (!alreadyInCandidates) {
-            // Compute distance for canonical match
-            const ticketEmb = canonicalTicket.embedding;
+            // Compute distance for canonical match (use summary_embedding if available)
+            const ticketEmb = canonicalTicket.summary_embedding || canonicalTicket.embedding;
             if (ticketEmb && Array.isArray(ticketEmb) && ticketEmb.length === embedding.length) {
               const distance = cosineDistance(embedding, ticketEmb);
               // Get channel ID from messages
@@ -1052,9 +1429,16 @@ export async function groupMessage(
           allCandidates.set(canonicalCandidate.ticketId, canonicalCandidate);
         }
       }
+      // Add thread candidate if found (high priority)
+      if (threadCandidate) {
+        const existing = allCandidates.get(threadCandidate.ticketId);
+        if (!existing || threadCandidate.distance < existing.distance) {
+          allCandidates.set(threadCandidate.ticketId, threadCandidate);
+        }
+      }
 
       const candidates = Array.from(allCandidates.values());
-      console.log(`[Group] CCR found ${candidates.length} unique candidate tickets`);
+      console.log(`[Group] CCR found ${candidates.length} unique candidate tickets${threadCandidate ? ' (including thread candidate)' : ''}`);
 
       if (candidates.length > 0) {
         // Score each candidate
@@ -1087,6 +1471,9 @@ export async function groupMessage(
             const messageSignals = classification.signals || [];
             const overlapCount = computeSignalOverlap(messageSignals, ticketSignals);
 
+            // Check if this is the thread candidate
+            const sameThread = threadCandidate && threadCandidate.ticketId === candidate.ticketId;
+
             // Compute CCR match score
             const categoryCompatibility = isCategoryCompatible(classification.category, ticket.category);
             const scoreResult = computeCCRMatchScore({
@@ -1095,6 +1482,7 @@ export async function groupMessage(
               categoryCompatibility,
               overlapCount,
               updatedAt: candidate.updatedAt,
+              sameThread: sameThread || false,
             });
 
             // Apply CCR guardrails
@@ -1132,8 +1520,9 @@ export async function groupMessage(
         console.log('[Group] CCR top 5 candidates:');
         for (let i = 0; i < top5.length; i++) {
           const item = top5[i];
+          const isThread = threadCandidate && threadCandidate.ticketId === item.candidate.ticketId;
           console.log(
-            `[Group] CCR candidate ${i + 1}: ticket=${item.candidate.ticketId}, distance=${item.distance.toFixed(4)}, overlap=${item.overlapCount}, score=${item.score.toFixed(3)}, channel=${item.candidate.slackChannelId || 'unknown'}, updated=${item.candidate.updatedAt}`
+            `[Group] CCR candidate ${i + 1}: ticket=${item.candidate.ticketId}, distance=${item.distance.toFixed(4)}, overlap=${item.overlapCount}, score=${item.score.toFixed(3)}, sameThread=${isThread}, channel=${item.candidate.slackChannelId || 'unknown'}, updated=${item.candidate.updatedAt}`
           );
         }
 
@@ -1237,11 +1626,21 @@ export async function groupMessage(
   });
   console.log('[Group] Summary generated:', summary.description);
 
+  // Compute summary_embedding for new ticket
+  const ticketSignals = classification.signals || [];
+  const summaryEmbedding = await computeSummaryEmbedding({
+    title: classification.short_title || messageData.text.substring(0, 100),
+    category: classification.category === 'irrelevant' ? 'support_question' : classification.category,
+    summary,
+    signals: ticketSignals,
+  });
+
   const ticket = await createTicket({
     title: classification.short_title || messageData.text.substring(0, 100),
     category: classification.category === 'irrelevant' ? 'support_question' : classification.category,
     canonical_key: canonicalKey || null,
     embedding,
+    summary_embedding: summaryEmbedding,
     assignees,
     reporter_user_id: messageData.slack_user_id,
     reporter_username: messageData.slack_username || null,
@@ -1250,11 +1649,20 @@ export async function groupMessage(
 
   console.log('[Group] Created new ticket:', ticket.id, 'title:', ticket.title);
 
+  // For new tickets, skip redundancy check (no prior messages to compare)
+  const normalized = normalizeMessage(messageData.text);
+  const intentFingerprint = computeIntentFingerprint(messageData.text, normalized.signals);
   const message = await upsertMessage({
     ...messageData,
     ticket_id: ticket.id,
     embedding,
     is_context_only: isContextOnly,
+    is_redundant: false,
+    redundant_of_message_id: null,
+    intent_key: intentFingerprint.intent_key,
+    intent_object: intentFingerprint.intent_object,
+    intent_action: intentFingerprint.intent_action,
+    intent_value: intentFingerprint.intent_value,
   });
 
   if (message.ticket_id !== ticket.id) {

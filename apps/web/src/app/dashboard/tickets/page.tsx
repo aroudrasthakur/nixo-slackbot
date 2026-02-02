@@ -1,4 +1,4 @@
-import { DashboardContent } from "@/components/DashboardContent";
+import { TicketsPageContent } from "@/components/TicketsPageContent";
 import type { Ticket } from "@nixo-slackbot/shared";
 
 export const dynamic = "force-dynamic";
@@ -22,12 +22,11 @@ async function getTickets(): Promise<{ tickets: Ticket[]; error?: string }> {
   }
 }
 
-export default async function DashboardPage() {
+export default async function TicketsPage() {
   const { tickets, error } = await getTickets();
 
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
-      {/* Header */}
       <div
         style={{
           borderBottom: "1px solid #e8e8e8",
@@ -44,7 +43,7 @@ export default async function DashboardPage() {
             lineHeight: 1.3,
           }}
         >
-          Dashboard
+          Tickets
         </h1>
         <p
           style={{
@@ -54,11 +53,10 @@ export default async function DashboardPage() {
             marginBottom: 0,
           }}
         >
-          Overview of your support tickets from Slack
+          Search and filter your support tickets
         </p>
       </div>
 
-      {/* Content */}
       <div
         style={{
           flex: 1,
@@ -66,7 +64,7 @@ export default async function DashboardPage() {
           padding: "24px",
         }}
       >
-        <DashboardContent
+        <TicketsPageContent
           initialTickets={tickets}
           initialError={error}
         />
