@@ -56,14 +56,23 @@ export function Sidebar() {
         zIndex: 100,
       }}
     >
-      {/* Logo/Brand */}
+      {/* Logo/Brand – click to go to landing page */}
       <div
         style={{
           padding: "16px",
           borderBottom: "1px solid rgba(255,255,255,0.1)",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+        <Link
+          href="/"
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+            textDecoration: "none",
+            color: "inherit",
+          }}
+        >
           <div
             style={{
               width: "36px",
@@ -97,7 +106,7 @@ export function Sidebar() {
           >
             Nixo Bot
           </span>
-        </div>
+        </Link>
       </div>
 
       {/* Navigation */}

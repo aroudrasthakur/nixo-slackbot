@@ -64,14 +64,26 @@ export default function HomePage() {
               flexShrink: 0,
             }}
           />
-          <span
-            style={{ fontSize: "20px", fontWeight: 700, color: "#1d1c1d" }}
-          >
+          <span style={{ fontSize: "20px", fontWeight: 700, color: "#1d1c1d" }}>
             Nixo Bot
           </span>
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
+          <Link
+            href="/dashboard"
+            style={{
+              padding: "10px 20px",
+              fontSize: "14px",
+              fontWeight: 600,
+              color: "#1264a3",
+              textDecoration: "none",
+              borderRadius: "6px",
+              transition: "background-color 0.15s",
+            }}
+          >
+            Go to Dashboard
+          </Link>
           <Link
             href="/signin"
             style={{
@@ -122,8 +134,7 @@ export default function HomePage() {
             margin: 0,
           }}
         >
-          Support tickets,{" "}
-          <span style={{ color: "#3F0E40" }}>simplified</span>
+          Support tickets, <span style={{ color: "#3F0E40" }}>simplified</span>
         </h1>
         <p
           style={{
@@ -143,8 +154,24 @@ export default function HomePage() {
             display: "flex",
             gap: "16px",
             justifyContent: "center",
+            flexWrap: "wrap",
           }}
         >
+          <Link
+            href="/dashboard"
+            style={{
+              padding: "16px 32px",
+              fontSize: "16px",
+              fontWeight: 600,
+              color: "#ffffff",
+              backgroundColor: "#1264a3",
+              textDecoration: "none",
+              borderRadius: "8px",
+              transition: "background-color 0.15s",
+            }}
+          >
+            Go to Dashboard
+          </Link>
           <Link
             href="/signup"
             style={{
@@ -314,7 +341,7 @@ export default function HomePage() {
         }}
       >
         <p style={{ fontSize: "14px", color: "#616061", margin: 0 }}>
-          &copy; 2025 Nixo Bot. Built for modern support teams.
+          &copy; 2026 Nixo Bot. Built for modern support teams.
         </p>
       </footer>
     </div>
