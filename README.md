@@ -24,7 +24,16 @@ Slack (Socket Mode) → Bolt → Pipeline → DB → Socket.IO → Next.js UI
 
 **Verify:**
 
+**Bash:**
+
 ```bash
+node --version   # v20.x or higher
+pnpm --version
+```
+
+**PowerShell:**
+
+```powershell
 node --version   # v20.x or higher
 pnpm --version
 ```
@@ -37,7 +46,17 @@ Follow these steps in order.
 
 ### 1. Clone and install
 
+**Bash:**
+
 ```bash
+git clone <repository-url>
+cd nixo-slackbot
+pnpm install
+```
+
+**PowerShell:**
+
+```powershell
 git clone <repository-url>
 cd nixo-slackbot
 pnpm install
@@ -101,9 +120,8 @@ Add these three values to your root `.env` so the dashboard can authenticate use
 
 All configuration is in a single root `.env` file. Copy the example and edit:
 
-```bash
-cp .env.example .env
-# Windows (PowerShell): Copy-Item .env.example .env
+```powershell
+Copy-Item .env.example .env
 ```
 
 Set each variable:
@@ -152,7 +170,15 @@ _Note: Legacy variables like `SIMILARITY_THRESHOLD` are preserved for backward c
 
 From the project root:
 
+**Bash:**
+
 ```bash
+pnpm dev
+```
+
+**PowerShell:**
+
+```powershell
 pnpm dev
 ```
 
@@ -167,8 +193,9 @@ Note: `/dashboard` and `/dashboard/tickets` are protected and require Sign-up/Lo
 
 **Run apps individually (optional):**
 
-```bash
-cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
+```powershell
+cd apps\backend; pnpm dev
+# or: cd apps\web; pnpm dev
 ```
 
 ### 8. Verify setup
@@ -179,8 +206,20 @@ cd apps/backend && pnpm dev    # or: cd apps/web && pnpm dev
 - **Slack:** Backend logs show "Slack Bolt app started"; sending a relevant message in Slack creates/updates a ticket
 - **Dashboard:** http://localhost:3000/dashboard shows overview and ticket list; http://localhost:3000/dashboard/tickets shows the tickets-only view; new/updated tickets appear in real time (Socket.IO)
 - **Ticket detail:** Open a ticket from Dashboard or Tickets; the back arrow returns to the page you came from (`/dashboard` or `/dashboard/tickets` via `?from=dashboard` or `?from=tickets`)
-- **Test without Slack:**  
-  `curl -X POST http://localhost:4000/dev/ingest -H "Content-Type: application/json" -d "{\"channel\":\"C1234567890\",\"ts\":\"1234567890.123456\",\"user\":\"U9876543210\",\"text\":\"I found a bug in the API\"}"`  
+- **Test without Slack:**
+
+  **Bash:**
+
+  ```bash
+  curl -X POST http://localhost:4000/dev/ingest -H "Content-Type: application/json" -d '{"channel":"C1234567890","ts":"1234567890.123456","user":"U9876543210","text":"I found a bug in the API"}'
+  ```
+
+  **PowerShell:**
+
+  ```powershell
+  Invoke-RestMethod -Uri "http://localhost:4000/dev/ingest" -Method Post -ContentType "application/json" -Body '{"channel":"C1234567890","ts":"1234567890.123456","user":"U9876543210","text":"I found a bug in the API"}'
+  ```
+
   A new ticket should appear on the dashboard.
 
 ---
