@@ -42,15 +42,22 @@ const features = [
 export default function HomePage() {
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff" }}>
-      {/* Navigation */}
+      {/* Navigation - fixed at top */}
       <nav
         style={{
+          position: "fixed",
+          top: 0,
+          left: 0,
+          right: 0,
+          zIndex: 50,
           padding: "16px 24px",
           display: "flex",
           alignItems: "center",
           justifyContent: "space-between",
           maxWidth: "1200px",
           margin: "0 auto",
+          backgroundColor: "#ffffff",
+          borderBottom: "1px solid #3F0E40",
         }}
       >
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
@@ -116,10 +123,11 @@ export default function HomePage() {
         </div>
       </nav>
 
-      {/* Hero Section */}
+      {/* Hero Section - padding-top for fixed nav */}
       <section
         style={{
           padding: "80px 24px",
+          paddingTop: "160px",
           textAlign: "center",
           maxWidth: "800px",
           margin: "0 auto",

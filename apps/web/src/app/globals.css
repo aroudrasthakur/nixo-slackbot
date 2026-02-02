@@ -57,3 +57,18 @@ main select {
 .loading-logo {
   animation: loading-pulse 1.2s ease-in-out infinite;
 }
+
+/* Auth pages: stack on small screens */
+@media (max-width: 768px) {
+  .auth-split-layout {
+    flex-direction: column !important;
+  }
+  .auth-left-panel {
+    min-height: auto !important;
+    padding: 48px 24px 32px !important;
+  }
+  .auth-right-panel {
+    min-height: auto !important;
+    padding: 32px 24px 48px !important;
+  }
+}
