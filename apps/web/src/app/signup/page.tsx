@@ -5,6 +5,73 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 
+/** Password must have: lowercase, uppercase, number, symbol, and be at least 8 chars */
+function validatePassword(password: string): {
+  valid: boolean;
+  message?: string;
+} {
+  if (password.length < 8) {
+    return { valid: false, message: "Password must be at least 8 characters" };
+  }
+  if (!/[a-z]/.test(password)) {
+    return {
+      valid: false,
+      message: "Password must contain at least one lowercase letter",
+    };
+  }
+  if (!/[A-Z]/.test(password)) {
+    return {
+      valid: false,
+      message: "Password must contain at least one uppercase letter",
+    };
+  }
+  if (!/[0-9]/.test(password)) {
+    return {
+      valid: false,
+      message: "Password must contain at least one number",
+    };
+  }
+  if (!/[^a-zA-Z0-9]/.test(password)) {
+    return {
+      valid: false,
+      message: "Password must contain at least one symbol (e.g. !@#$%)",
+    };
+  }
+  return { valid: true };
+}
+
+/** Maps Cognito signup errors to user-friendly messages */
+function getSignUpErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    const code = (err as Error & { code?: string }).code;
+    const name = err.name;
+    const msg = err.message?.toLowerCase() ?? "";
+
+    if (
+      code === "UsernameExistsException" ||
+      name === "UsernameExistsException" ||
+      code === "AliasExistsException" ||
+      name === "AliasExistsException" ||
+      msg.includes("already exists") ||
+      msg.includes("already registered")
+    ) {
+      return "This email is already in use. Sign in or use a different email.";
+    }
+
+    if (
+      code === "InvalidPasswordException" ||
+      name === "InvalidPasswordException" ||
+      (msg.includes("password") &&
+        (msg.includes("policy") || msg.includes("requirement")))
+    ) {
+      return "Password is not strong enough. Use at least 8 characters with one lowercase, one uppercase, one number, and one symbol.";
+    }
+
+    return err.message;
+  }
+  return "Failed to create account. Please try again.";
+}
+
 export default function SignUpPage() {
   const router = useRouter();
   const { signUp, isAuthenticated, isLoading: isAuthLoading } = useAuth();
@@ -22,18 +89,23 @@ export default function SignUpPage() {
   const [username, setUsername] = useState("");
   const [error, setError] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
     if (password !== confirmPassword) {
-      setError("Passwords do not match");
+      setError(
+        "Passwords do not match. Please make sure both fields are identical."
+      );
       return;
     }
 
-    if (password.length < 8) {
-      setError("Password must be at least 8 characters");
+    const passwordCheck = validatePassword(password);
+    if (!passwordCheck.valid) {
+      setError(passwordCheck.message);
       return;
     }
 
@@ -42,9 +114,7 @@ export default function SignUpPage() {
     try {
       await signUp({ email, password, firstName, lastName, username });
     } catch (err: unknown) {
-      const errorMessage =
-        err instanceof Error ? err.message : "Failed to create account";
-      setError(errorMessage);
+      setError(getSignUpErrorMessage(err));
     } finally {
       setIsLoading(false);
     }
@@ -317,29 +387,147 @@ export default function SignUpPage() {
               >
                 <div>
                   <label style={labelStyle}>Password</label>
-                  <input
-                    type="password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="8+ characters"
-                    required
-                    style={inputStyle}
-                    onFocus={handleFocus}
-                    onBlur={handleBlur}
-                  />
+                  <div style={{ position: "relative" }}>
+                    <input
+                      type={showPassword ? "text" : "password"}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="e.g. MyPass1!"
+                      required
+                      style={{ ...inputStyle, paddingRight: "44px" }}
+                      onFocus={handleFocus}
+                      onBlur={handleBlur}
+                      onPaste={(e) => e.preventDefault()}
+                      onCopy={(e) => e.preventDefault()}
+                      onCut={(e) => e.preventDefault()}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword((p) => !p)}
+                      aria-label={
+                        showPassword ? "Hide password" : "Show password"
+                      }
+                      style={{
+                        position: "absolute",
+                        right: "12px",
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        background: "none",
+                        border: "none",
+                        padding: 0,
+                        cursor: "pointer",
+                        color: "#616061",
+                      }}
+                    >
+                      {showPassword ? (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                          <line x1="1" y1="1" x2="23" y2="23" />
+                        </svg>
+                      ) : (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
+                  <p
+                    style={{
+                      marginTop: "6px",
+                      fontSize: "12px",
+                      color: "#616061",
+                      lineHeight: 1.4,
+                      marginBottom: 0,
+                    }}
+                  >
+                    At least 8 characters with one lowercase, one uppercase, one
+                    number, and one symbol (!@#$%...)
+                  </p>
                 </div>
                 <div>
-                  <label style={labelStyle}>Confirm</label>
-                  <input
-                    type="password"
-                    value={confirmPassword}
-                    onChange={(e) => setConfirmPassword(e.target.value)}
-                    placeholder="Confirm"
-                    required
-                    style={inputStyle}
-                    onFocus={handleFocus}
-                    onBlur={handleBlur}
-                  />
+                  <label style={labelStyle}>Confirm password</label>
+                  <div style={{ position: "relative" }}>
+                    <input
+                      type={showConfirmPassword ? "text" : "password"}
+                      value={confirmPassword}
+                      onChange={(e) => setConfirmPassword(e.target.value)}
+                      placeholder="Re-enter password"
+                      required
+                      style={{ ...inputStyle, paddingRight: "44px" }}
+                      onFocus={handleFocus}
+                      onBlur={handleBlur}
+                      onPaste={(e) => e.preventDefault()}
+                      onCopy={(e) => e.preventDefault()}
+                      onCut={(e) => e.preventDefault()}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowConfirmPassword((p) => !p)}
+                      aria-label={
+                        showConfirmPassword ? "Hide password" : "Show password"
+                      }
+                      style={{
+                        position: "absolute",
+                        right: "12px",
+                        top: "50%",
+                        transform: "translateY(-50%)",
+                        background: "none",
+                        border: "none",
+                        padding: 0,
+                        cursor: "pointer",
+                        color: "#616061",
+                      }}
+                    >
+                      {showConfirmPassword ? (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" />
+                          <line x1="1" y1="1" x2="23" y2="23" />
+                        </svg>
+                      ) : (
+                        <svg
+                          width="20"
+                          height="20"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        >
+                          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                          <circle cx="12" cy="12" r="3" />
+                        </svg>
+                      )}
+                    </button>
+                  </div>
                 </div>
               </div>
 
