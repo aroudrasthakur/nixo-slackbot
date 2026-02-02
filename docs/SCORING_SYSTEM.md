@@ -8,7 +8,7 @@ The pipeline uses **two** main scoring paths plus **guardrails** and **gray-zone
 
 **Behavior:** If the message’s `root_thread_ts` matches an open ticket, that ticket is added as a **candidate** with a **sameThread** flag. The message does **not** attach immediately; it continues through Steps 2–3.6 and is scored like any other message.
 
-- **sameThread bonus:** When the thread ticket is the chosen candidate, it gets a small score boost (Step 3.5: +`SAME_THREAD_BONUS`, default 0.12; Step 3.6: +min(0.08, SAME_THREAD_BONUS)).
+- **sameThread bonus:** When the thread ticket is the chosen candidate: **Step 3.5** uses sameThread only in **guardrails** (to allow merge when sameThread + evidence); the numeric score in `computeMatchScore` does **not** include a sameThread bonus. **Step 3.6 (CCR)** adds +min(0.08, SAME_THREAD_BONUS) to the score.
 - **Relevance over thread:** For **irrelevant** messages (`is_relevant: false`), attachment is allowed only as **context-only** if:
   - `score >= THREAD_CONTEXT_ONLY_MIN_SCORE` (default 0.60), **and**
   - at least one of: `overlapCount >= 1`, message matches **status-update** patterns (e.g. "on it", "fixed", "investigating"), or `distance <= 0.30`.
@@ -124,7 +124,7 @@ Design: **embedding is the main signal**, but **structure** (channel, recency, c
 
 **Cap:** `score = min(1.0, score)` (can go negative before cap; then min with 1).
 
-**Typical maxima:** Best case includes sameThread (+0.12) then capped at **1.0**. Incompatible category still mergeable if above 0.65. sameThread is a bonus, not a pass condition; guardrails (including filler block) can still block.
+**Typical maxima:** Best case (semantic 0.6 + same category 0.10 + same channel 0.15 + recent 0.15 + overlap 0.10) is **1.0** capped. Incompatible category still mergeable if above 0.65. sameThread does not add to score but can **allow** merge via guardrails; guardrails (including filler block) can still block.
 
 ---
 
@@ -135,15 +135,15 @@ Design: **embedding is the main signal**, but **structure** (channel, recency, c
 
 **Formula:**
 
-| Component | Condition                 | Bonus                     |
-| --------- | ------------------------- | ------------------------- |
-| Semantic  | Always                    | `(1 - distance/2) * 0.55` |
-| Category  | Same category             | +0.10                     |
-| Category  | Compatible                | +0.05                     |
-| Overlap   | overlapCount ≥ 1          | +0.10                     |
-| Overlap   | overlapCount ≥ 2          | +0.10 (extra)             |
-| Recency   | Ticket updated ≤ 24 h ago | +0.05                     |
-| sameThread| Thread ticket candidate   | +min(SAME_THREAD_BONUS, 0.08) |
+| Component  | Condition                 | Bonus                         |
+| ---------- | ------------------------- | ----------------------------- |
+| Semantic   | Always                    | `(1 - distance/2) * 0.55`     |
+| Category   | Same category             | +0.10                         |
+| Category   | Compatible                | +0.05                         |
+| Overlap    | overlapCount ≥ 1          | +0.10                         |
+| Overlap    | overlapCount ≥ 2          | +0.10 (extra)                 |
+| Recency    | Ticket updated ≤ 24 h ago | +0.05                         |
+| sameThread | Thread ticket candidate   | +min(SAME_THREAD_BONUS, 0.08) |
 
 **Cap:** `score = max(0, min(1, score))`.
 
@@ -172,13 +172,13 @@ So the **score** encodes "same vs compatible vs incompatible" as soft bonuses/pe
 
 Cell = compatibility when **message category** (row) is compared to **ticket category** (column). Symmetric (e.g. support_question ↔ feature_request is compatible in both directions).
 
-|                      | bug_report       | feature_request  | product_question | support_question | irrelevant   |
-| -------------------- | ---------------- | ---------------- | ---------------- | ---------------- | ------------ |
-| **bug_report**       | <span style="color: green">same</span>             | <span style="color: red">**incompatible**</span> | <span style="color: orange">sometimes</span>        | <span style="color: orange">sometimes</span>        | <span style="color: red">incompatible</span> |
-| **feature_request**  | <span style="color: red">**incompatible**</span> | <span style="color: green">same</span>             | <span style="color: blue">compatible</span>       | <span style="color: blue">compatible</span>       | <span style="color: red">incompatible</span> |
-| **product_question** | <span style="color: orange">sometimes</span>        | <span style="color: blue">compatible</span>       | <span style="color: green">same</span>             | <span style="color: blue">compatible</span>       | <span style="color: red">incompatible</span> |
-| **support_question** | <span style="color: orange">sometimes</span>        | <span style="color: blue">compatible</span>       | <span style="color: blue">compatible</span>       | <span style="color: green">same</span>             | <span style="color: red">incompatible</span> |
-| **irrelevant**       | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: green">same</span>         |
+|                      | bug_report                                       | feature_request                                  | product_question                             | support_question                             | irrelevant                                   |
+| -------------------- | ------------------------------------------------ | ------------------------------------------------ | -------------------------------------------- | -------------------------------------------- | -------------------------------------------- |
+| **bug_report**       | <span style="color: green">same</span>           | <span style="color: red">**incompatible**</span> | <span style="color: orange">sometimes</span> | <span style="color: orange">sometimes</span> | <span style="color: red">incompatible</span> |
+| **feature_request**  | <span style="color: red">**incompatible**</span> | <span style="color: green">same</span>           | <span style="color: blue">compatible</span>  | <span style="color: blue">compatible</span>  | <span style="color: red">incompatible</span> |
+| **product_question** | <span style="color: orange">sometimes</span>     | <span style="color: blue">compatible</span>      | <span style="color: green">same</span>       | <span style="color: blue">compatible</span>  | <span style="color: red">incompatible</span> |
+| **support_question** | <span style="color: orange">sometimes</span>     | <span style="color: blue">compatible</span>      | <span style="color: blue">compatible</span>  | <span style="color: green">same</span>       | <span style="color: red">incompatible</span> |
+| **irrelevant**       | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span>     | <span style="color: red">incompatible</span> | <span style="color: red">incompatible</span> | <span style="color: green">same</span>       |
 
 **Score effect (Step 3.5):**
 
@@ -381,8 +381,7 @@ Merge only if LLM returns e.g. `should_merge === true` and **confidence ≥ 0.7*
 1. For each candidate (including thread candidate when applicable): CCR guardrails; if block → skip candidate.
 2. Sort by score; take best. Log top 5 with sameThread flag.
 3. If score ≥ SCORE_THRESHOLD (0.75) **or** (overlapCount ≥ 2 and distance ≤ 0.45 and score ≥ 0.65):
-   - **If irrelevant:** merge only as context-only when score ≥ THREAD_CONTEXT_ONLY_MIN_SCORE **and** (overlapCount ≥ 1 **or** status-update **or** distance ≤ 0.30); otherwise **drop**.
-   - **If relevant:** merge.
+   - **If relevant:** merge. (CCR merge path does **not** currently apply irrelevant/context-only rules or redundancy detection; message is stored with `upsertMessage` only.)
 4. Else if CCR gray-zone → CCR LLM; if merge and confidence ≥ 0.7 → merge.
 5. Else → no merge (Step 4).
 
@@ -413,7 +412,7 @@ So:
 
 **Tradeoffs:**
 
-- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, REDUNDANT_DISTANCE_THRESHOLD, REDUNDANT_LOOKBACK, gray-zone bands, RECENT_WINDOW_MINUTES. Raising thresholds → fewer merges.
+- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, REDUNDANT_DISTANCE_THRESHOLD, REDUNDANT_LOOKBACK, gray-zone bands (SIMILARITY_GRAYZONE_LOW, SIMILARITY_GRAYZONE_HIGH), RECENT_WINDOW_MINUTES, CROSS_CHANNEL_DAYS (default 14), MATCH_TOPK_TICKETS (default 15), MATCH_TOPK_MESSAGES (default 25). Raising thresholds → fewer merges.
 - **Overlap + normalization:** Signal overlap uses normalized synonyms; CCR overlap has large impact (+0.20 for 2+). Noisy signals can increase merges/splits.
 - **Rare-token set:** Fixed list; add domain terms if needed for CCR.
 - **Recency:** 10 min (3.5) vs 24 h (3.6) in CCR is intentional.
