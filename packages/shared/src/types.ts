@@ -21,6 +21,7 @@ export interface Ticket {
   status: TicketStatus;
   canonical_key: string | null;
   embedding: number[] | null;
+  summary_embedding: number[] | null;
   assignees: string[];
   reporter_user_id: string | null;
   reporter_username: string | null;
@@ -42,6 +43,10 @@ export interface Message {
   text: string;
   permalink: string | null;
   created_at: string;
+  /** Channel display name (e.g. #general), resolved from Slack when loading ticket */
+  slack_channel_name?: string | null;
+  /** Workspace/team display name, resolved from Slack when loading ticket */
+  slack_workspace_name?: string | null;
 }
 
 export interface ClassificationResult {

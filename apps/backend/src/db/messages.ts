@@ -1,5 +1,6 @@
 import { supabase } from './client';
 import type { Message } from '@nixo-slackbot/shared';
+import type { TicketCandidate } from './tickets';
 
 export interface MessageInsert {
   ticket_id: string;

@@ -68,7 +68,7 @@ export function DashboardTickets({
       );
     }
 
-    // Status (open / resolved / closed)
+    // Status (open / resolved)
     if (statusFilter !== "all") {
       result = result.filter((t) => t.status === statusFilter);
     }
@@ -310,7 +310,6 @@ export function DashboardTickets({
               <option value="all">All statuses</option>
               <option value="open">Open</option>
               <option value="resolved">Resolved</option>
-              <option value="closed">Closed</option>
             </select>
           </div>
         </div>

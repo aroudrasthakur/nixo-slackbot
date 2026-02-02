@@ -30,12 +30,13 @@ function parseEmbedding(embedding: unknown): number[] | null {
 }
 
 /**
- * Normalize a raw ticket row from Supabase, parsing the embedding field.
+ * Normalize a raw ticket row from Supabase, parsing the embedding fields.
  */
 function normalizeTicket(row: Record<string, unknown>): Ticket {
   return {
     ...row,
     embedding: parseEmbedding(row.embedding),
+    summary_embedding: parseEmbedding(row.summary_embedding),
   } as Ticket;
 }
 
@@ -44,6 +45,7 @@ export interface TicketInsert {
   category: 'bug_report' | 'support_question' | 'feature_request' | 'product_question';
   canonical_key?: string | null;
   embedding?: number[] | null;
+  summary_embedding?: number[] | null;
   assignees?: string[];
   reporter_user_id?: string | null;
   reporter_username?: string | null;
@@ -224,6 +226,7 @@ export async function createTicket(data: TicketInsert): Promise<Ticket> {
         status: 'open',
         canonical_key: data.canonical_key || null,
         embedding: data.embedding || null,
+        summary_embedding: data.summary_embedding || null,
         assignees: data.assignees || [],
         reporter_user_id: data.reporter_user_id || null,
         reporter_username: data.reporter_username || null,

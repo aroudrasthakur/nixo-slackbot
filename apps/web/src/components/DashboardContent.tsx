@@ -39,6 +39,11 @@ export function DashboardContent({
     }
   }, []);
 
+  // Refetch tickets and metrics every time the dashboard is shown (mount / navigation to /dashboard)
+  useEffect(() => {
+    fetchTickets();
+  }, [fetchTickets]);
+
   // Refetch when a ticket is created or updated (socket event from backend)
   useEffect(() => {
     const unsubscribe = onTicketUpdated(fetchTickets);

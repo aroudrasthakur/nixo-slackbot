@@ -57,6 +57,7 @@ This installs dependencies for all workspaces (backend, web, shared).
    - `supabase/migrations/005_messages_update_trigger.sql` - Message update trigger
    - `supabase/migrations/006_scored_matching.sql` - Scored matching functions
    - `supabase/migrations/007_cross_channel_context.sql` - Cross-channel context RPCs and `is_context_only` column
+   - `supabase/migrations/008_summary_embedding.sql` - `summary_embedding` column and RPCs using it for matching
 3. In **Project Settings** → **API**, copy **Project URL** and **Service role key** (use as `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`). Never expose the service role key in the frontend or in public repos.
 
 ### 3. Slack app
@@ -104,6 +105,9 @@ Set each variable:
 | `CROSS_CHANNEL_DAYS`             | Days to look back for cross-channel context retrieval (CCR)                 | `14` (default)              |
 | `MATCH_TOPK_TICKETS`             | Number of ticket candidates to fetch for CCR                                | `15` (default)              |
 | `MATCH_TOPK_MESSAGES`            | Number of message candidates to fetch for CCR                               | `25` (default)              |
+| `SAME_THREAD_BONUS`              | Score bonus when message is in same thread as candidate ticket              | `0.12` (default)            |
+| `THREAD_IRRELEVANT_BLOCK`        | Block irrelevant filler in thread even when sameThread                      | `true` (default)            |
+| `THREAD_CONTEXT_ONLY_MIN_SCORE`  | Min score for irrelevant thread messages to attach as context-only          | `0.60` (default)            |
 | **Supabase**                     |                                                                             |                             |
 | `SUPABASE_URL`                   | Supabase project URL                                                        | `https://xxxxx.supabase.co` |
 | `SUPABASE_SERVICE_ROLE_KEY`      | Service role key                                                            | Project Settings → API      |
@@ -169,50 +173,39 @@ To demonstrate the system in 1-2 minutes:
 
 1. **Heuristic filter:** Examples like "thanks", "ok", "cool" are flagged as low-signal.
 2. **Context-aware OpenAI classification:** Classifies messages into `bug_report`, `support_question`, `feature_request`, etc.
-   - **Important:** The system still attempts to ATTACH low-signal messages to existing tickets (Steps 1-3.6 below) to maintain conversation context.
-   - Ideally, only messages with `is_relevant: true` trigger the creation of a _NEW_ ticket (Step 4).
-   - Context-only updates (e.g., "Thanks, got it") are attached to tickets to keep the timeline complete but are marked `is_context_only: true`.
+   - The system attempts to attach messages to existing tickets (Steps 1–3.6); only messages with `is_relevant: true` create a _new_ ticket (Step 4).
+   - Irrelevant messages may attach as **context-only** only if they meet score and evidence rules (see [Scoring system](docs/SCORING_SYSTEM.md)); pure filler in a thread can be blocked even when in the same thread.
 
 ### Grouping Algorithm (Step-by-Step Message Matching)
 
-When a new Slack message arrives, it goes through a multi-step matching process.
+When a new Slack message arrives, it goes through a multi-step matching process. Full details (formulas, guardrails, in-thread rules) are in [**docs/SCORING_SYSTEM.md**](docs/SCORING_SYSTEM.md).
 
-#### Step 1: Thread Matching
+#### Step 1: Thread Candidate Boost
 
-- Check if `root_thread_ts` matches an open ticket.
-- **Match?** Attach & Done.
+- If `root_thread_ts` matches an open ticket, that ticket is added as a **candidate** with a **sameThread** flag. The message does **not** attach here; it continues through Steps 2–3.6 and is scored like any other message.
+- **sameThread** is a small score bonus (Step 3.5: +0.12, Step 3.6: +0.08), not a pass condition. **Relevance and evidence dominate:** irrelevant thread chatter (e.g. "lol thanks") is dropped unless it meets context-only rules (score ≥ 0.60 and overlap ≥ 1 or status-update or distance ≤ 0.30). Filler messages in thread can be blocked even when sameThread.
 
 #### Step 2: Entity-Based Canonical Key Matching
 
-- Extracts entity signals (e.g., `csv|export`, `access_control|admin`).
-- Generates a stable, sorted "canonical key".
-- **Match?** Attach & Done.
+- Entity signals and stable canonical key. **Match?** Attach & Done.
 
 #### Step 3: Scored Semantic Matching
 
-- Fetches the **top 1 candidate** via vector search against open tickets.
-- Computes a match score (Semantic Similarity 60% + Structural Signals).
-- **Match?** If score ≥ `SCORE_THRESHOLD` (default 0.75), Attach & Done.
+- Vector search (prefer **summary_embedding**, fallback **embedding**). Score ≥ `SCORE_THRESHOLD` (0.75) → Attach & Done.
 
-#### Step 3.5: Recent Channel Fallback (Scored)
+#### Step 3.5: Recent Channel Fallback
 
-- Checks recent tickets in the _same channel_ (last 5 mins).
-- Uses a lower threshold (`RECENT_CHANNEL_SCORE_THRESHOLD`, default 0.65) because temporal locality is a strong signal.
+- Same channel, last 5 mins; threshold `RECENT_CHANNEL_SCORE_THRESHOLD` (0.65). Irrelevant messages only attach as context-only if they meet the minimum score and evidence rules.
 
 #### Step 3.6: Cross-Channel Context Retrieval (CCR)
 
-- **Goal:** Group related issues across different channels/days.
-- **Process:**
-  - Fetches top **15 tickets** and top **25 messages** via vector search.
-  - Scores candidates using: `Semantic * 0.55 + Category Bonus + Overlap Bonus + Recency`.
-  - **Guardrails:** prevent merging unrelated topics (requires signal overlap or very high similarity).
-  - **LLM Check:** If score is in "Gray Zone", `gpt-4o-mini` decides if they represent the same underlying issue.
+- Union of top **15 tickets** and **25 messages** by vector search (prefer **summary_embedding**). Thread candidate included with sameThread bonus. Signals normalized (synonym map). Guardrails and optional LLM gray-zone check. Irrelevant messages follow the same context-only rules.
 
 #### Step 4: Create New Ticket
 
-- If no match found in Steps 1-3.6, create a new ticket.
+- No match in 1–3.6 → create new ticket.
 
-**Scoring system:** The full scoring logic—formulas, guardrails, category compatibility matrix, semantic similarity, and gray-zone LLM checks—is documented in [**docs/SCORING_SYSTEM.md**](docs/SCORING_SYSTEM.md).
+**Summary embeddings:** Tickets store **summary_embedding** (title + category + summary + signals) and use it for matching when present, improving cross-conversation accuracy over the initial-message embedding alone.
 
 ---
 

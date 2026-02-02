@@ -1,9 +1,10 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import type { TicketWithMessages } from "@nixo-slackbot/shared";
 import { MessageTimeline } from "./MessageTimeline";
+import { useSocket } from "@/hooks/useSocket";
 
 interface TicketDetailProps {
   ticket: TicketWithMessages;
@@ -13,6 +14,30 @@ export function TicketDetail({ ticket: initialTicket }: TicketDetailProps) {
   const router = useRouter();
   const [ticket, setTicket] = useState(initialTicket);
   const [isResolving, setIsResolving] = useState(false);
+  const { onTicketUpdated } = useSocket();
+
+  const fetchTicket = useCallback(async () => {
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+    try {
+      const res = await fetch(`${apiUrl}/api/tickets/${ticket.id}`);
+      if (res.ok) {
+        const data: TicketWithMessages = await res.json();
+        setTicket(data);
+      }
+    } catch (err) {
+      console.error("Failed to refetch ticket:", err);
+    }
+  }, [ticket.id]);
+
+  // Refetch this ticket when a message is added (socket ticket_updated for this ticket)
+  useEffect(() => {
+    const unsubscribe = onTicketUpdated((updatedTicketId) => {
+      if (updatedTicketId === ticket.id) {
+        fetchTicket();
+      }
+    });
+    return unsubscribe;
+  }, [ticket.id, onTicketUpdated, fetchTicket]);
   const categoryColors: Record<string, string> = {
     bug_report: "#e01e5a",
     support_question: "#1264a3",
@@ -227,57 +252,146 @@ export function TicketDetail({ ticket: initialTicket }: TicketDetailProps) {
         >
           <h2
             style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "8px",
               fontSize: "15px",
               fontWeight: 700,
               color: "#1d1c1d",
-              marginBottom: "12px",
-            }}
-          >
-            Summary
-          </h2>
-
-          {/* Description */}
-          <p
-            style={{
-              fontSize: "14px",
-              color: "#1d1c1d",
-              lineHeight: 1.6,
               marginBottom: "16px",
             }}
           >
-            {ticket.summary.description}
-          </p>
-
-          {/* Action Items */}
-          {ticket.summary.action_items && ticket.summary.action_items.length > 0 && (
-            <div style={{ marginBottom: "16px" }}>
-              <h3
-                style={{
-                  fontSize: "13px",
-                  fontWeight: 600,
-                  color: "#616061",
-                  marginBottom: "8px",
-                }}
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                justifyContent: "center",
+                color: "#7c4dff",
+              }}
+              aria-hidden
+            >
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 24 24"
+                fill="currentColor"
+                style={{ flexShrink: 0 }}
               >
-                Action Items
-              </h3>
+                <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
+              </svg>
+            </span>
+            Summary
+          </h2>
+
+          {/* Title */}
+          <div style={{ marginBottom: "16px" }}>
+            <div
+              style={{
+                fontSize: "12px",
+                fontWeight: 600,
+                color: "#616061",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                marginBottom: "4px",
+              }}
+            >
+              Title
+            </div>
+            <div
+              style={{
+                fontSize: "15px",
+                fontWeight: 600,
+                color: "#1d1c1d",
+                lineHeight: 1.4,
+              }}
+            >
+              {ticket.title}
+            </div>
+          </div>
+
+          {/* Body — general summary of the conversation; suggest changes if possible from context */}
+          <div style={{ marginBottom: "16px" }}>
+            <div
+              style={{
+                fontSize: "12px",
+                fontWeight: 600,
+                color: "#616061",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                marginBottom: "6px",
+              }}
+            >
+              Body
+            </div>
+            <p
+              style={{
+                margin: 0,
+                fontSize: "14px",
+                color: "#1d1c1d",
+                lineHeight: 1.6,
+              }}
+            >
+              {ticket.summary.description}
+            </p>
+          </div>
+
+          {/* To-do — list of tasks */}
+          <div>
+            <div
+              style={{
+                fontSize: "12px",
+                fontWeight: 600,
+                color: "#616061",
+                textTransform: "uppercase",
+                letterSpacing: "0.5px",
+                marginBottom: "8px",
+              }}
+            >
+              To-do
+            </div>
+            {ticket.summary.action_items && ticket.summary.action_items.length > 0 ? (
               <ul
                 style={{
                   margin: 0,
-                  paddingLeft: "20px",
+                  paddingLeft: "24px",
+                  listStyle: "none",
                   fontSize: "14px",
                   color: "#1d1c1d",
                   lineHeight: 1.6,
                 }}
               >
                 {ticket.summary.action_items.map((item, idx) => (
-                  <li key={idx} style={{ marginBottom: "4px" }}>
+                  <li
+                    key={idx}
+                    style={{
+                      marginBottom: "8px",
+                      paddingLeft: "8px",
+                      position: "relative",
+                    }}
+                  >
+                    <span
+                      style={{
+                        position: "absolute",
+                        left: "-20px",
+                        top: "2px",
+                        width: "14px",
+                        height: "14px",
+                        border: "2px solid #c4b5fd",
+                        borderRadius: "4px",
+                        boxSizing: "border-box",
+                      }}
+                      aria-hidden
+                    />
                     {item}
                   </li>
                 ))}
               </ul>
-            </div>
-          )}
+            ) : (
+              <p style={{ margin: 0, fontSize: "14px", color: "#8b8b8b" }}>
+                No tasks listed.
+              </p>
+            )}
+          </div>
 
           {/* Technical Details */}
           {ticket.summary.technical_details && (

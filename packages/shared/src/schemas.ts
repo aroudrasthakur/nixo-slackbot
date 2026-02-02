@@ -33,6 +33,7 @@ export const TicketSchema = z.object({
   status: TicketStatusSchema,
   canonical_key: z.string().nullable(),
   embedding: z.array(z.number()).nullable(),
+  summary_embedding: z.array(z.number()).nullable(),
   assignees: z.array(z.string()),
   reporter_user_id: z.string().nullable(),
   reporter_username: z.string().nullable(),
@@ -54,6 +55,8 @@ export const MessageSchema = z.object({
   text: z.string(),
   permalink: z.string().nullable(),
   created_at: z.string(),
+  slack_channel_name: z.string().nullable().optional(),
+  slack_workspace_name: z.string().nullable().optional(),
 });
 
 export const TicketWithMessagesSchema = TicketSchema.extend({

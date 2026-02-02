@@ -156,11 +156,12 @@ export function MessageTimeline({ messages }: MessageTimelineProps) {
 
                 {/* Message content */}
                 <div style={{ flex: 1, minWidth: 0 }}>
-                  {/* Header */}
+                  {/* Header: user, time, channel & workspace */}
                   <div
                     style={{
                       display: "flex",
                       alignItems: "baseline",
+                      flexWrap: "wrap",
                       gap: "8px",
                       marginBottom: "4px",
                     }}
@@ -177,6 +178,27 @@ export function MessageTimeline({ messages }: MessageTimelineProps) {
                     <span style={{ fontSize: "12px", color: "#616061" }}>
                       {formatTime(message.created_at)}
                     </span>
+                    {(() => {
+                      const channelLabel =
+                        message.slack_channel_name ??
+                        (message.slack_channel_id && `#${message.slack_channel_id.slice(-8)}`);
+                      const workspaceLabel =
+                        message.slack_workspace_name ??
+                        (message.slack_team_id && message.slack_team_id.slice(-8));
+                      const label = [channelLabel, workspaceLabel].filter(Boolean).join(" · ");
+                      if (!label) return null;
+                      return (
+                        <span
+                          style={{
+                            fontSize: "11px",
+                            color: "#8b8b8b",
+                            marginLeft: "auto",
+                          }}
+                        >
+                          {label}
+                        </span>
+                      );
+                    })()}
                   </div>
 
                   {/* Text bubble */}

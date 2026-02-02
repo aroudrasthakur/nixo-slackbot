@@ -32,6 +32,49 @@ function stem(word: string): string {
   return word;
 }
 
+/**
+ * Normalize a signal using synonym mapping.
+ * Maps variants to canonical forms for consistent matching.
+ */
+function normalizeSignal(signal: string): string {
+  const lower = signal.toLowerCase().trim();
+  
+  // Synonym map: map variants to canonical forms
+  const synonymMap: Record<string, string> = {
+    // Super admin variants
+    'super admin': 'superadmin',
+    'super-admin': 'superadmin',
+    'super_admin': 'superadmin',
+    
+    // Access control variants
+    'rbac': 'access_control',
+    'permission': 'access_control',
+    'permissions': 'access_control',
+    'access': 'access_control',
+    'restrict': 'access_control',
+    'authorization': 'access_control',
+    'authz': 'access_control',
+    
+    // Budget variants
+    'budget page': 'budget',
+    'budget module': 'budget',
+  };
+  
+  // Check exact match first
+  if (synonymMap[lower]) {
+    return synonymMap[lower];
+  }
+  
+  // Check if signal contains any synonym key
+  for (const [variant, canonical] of Object.entries(synonymMap)) {
+    if (lower.includes(variant)) {
+      return canonical;
+    }
+  }
+  
+  return lower;
+}
+
 export function normalizeMessage(text: string): NormalizedMessage {
   const trimmed = text.trim();
   const normalizedText = trimmed.toLowerCase();
@@ -44,6 +87,23 @@ export function normalizeMessage(text: string): NormalizedMessage {
   const errorCodes = trimmed.match(errorCodePattern);
   if (errorCodes) {
     signals.push(...errorCodes.map((c) => c.toLowerCase().replace(/[^a-z0-9]/g, '_')));
+  }
+
+  // Error phrases (e.g., "permission denied", "unauthorized")
+  const errorPhrases = [
+    'permission denied',
+    'unauthorized',
+    'access denied',
+    'forbidden',
+    'not found',
+    'internal server error',
+  ];
+  for (const phrase of errorPhrases) {
+    if (normalizedText.includes(phrase)) {
+      // Extract key words from phrase
+      const words = phrase.split(' ');
+      signals.push(...words.filter(w => w.length > 2));
+    }
   }
 
   // Roles: admin, superadmin, owner, user, guest
@@ -86,8 +146,16 @@ export function normalizeMessage(text: string): NormalizedMessage {
     }
   }
 
-  // Endpoints: /v1/*, /api/* patterns
-  const endpointPattern = /\/(?:v\d+|api)\/[\w\/\-]+/gi;
+  // Auth terms: oauth, sso (also extract as standalone signals)
+  const authTerms = ['oauth', 'sso'];
+  for (const term of authTerms) {
+    if (normalizedText.includes(term)) {
+      signals.push(term);
+    }
+  }
+
+  // Endpoints: /v1/*, /api/*, /auth/* patterns
+  const endpointPattern = /\/(?:v\d+|api|auth)\/[\w\/\-]+/gi;
   const endpoints = trimmed.match(endpointPattern);
   if (endpoints) {
     signals.push(...endpoints.map((e) => e.toLowerCase().replace(/\//g, '_')));
@@ -126,9 +194,9 @@ export function computeCanonicalKey(signals: string[]): string | null {
     return null;
   }
 
-  // Normalize signals: remove prefixes, lowercase, dedupe
+  // Normalize signals: apply synonym normalization, remove prefixes, lowercase, dedupe
   const normalized = signals
-    .map((s) => s.toLowerCase().replace(/^(platform_|feature_|error_)/, ''))
+    .map((s) => normalizeSignal(s).replace(/^(platform_|feature_|error_)/, ''))
     .filter((s) => s.length > 0)
     .filter((s, i, arr) => arr.indexOf(s) === i); // Dedupe
 

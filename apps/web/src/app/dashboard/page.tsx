@@ -1,6 +1,8 @@
 import { DashboardContent } from "@/components/DashboardContent";
 import type { Ticket } from "@nixo-slackbot/shared";
 
+export const dynamic = "force-dynamic";
+
 async function getTickets(): Promise<{ tickets: Ticket[]; error?: string }> {
   const baseUrl = process.env.NEXT_PUBLIC_APP_ORIGIN || "http://localhost:3000";
   try {

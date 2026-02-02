@@ -1,10 +1,26 @@
 # In-Depth Analysis of the Scoring System
 
-The pipeline uses **two** main scoring paths plus **guardrails** and **gray-zone LLM checks**. Scoring is additive and capped; guardrails can block merges even when the score is high.
+The pipeline uses **two** main scoring paths plus **guardrails** and **gray-zone LLM checks**. Scoring is additive and capped; guardrails can block merges even when the score is high. **In-thread messages** no longer auto-attach; they enter the same pipeline and receive a small **same-thread bonus** when the thread ticket is a candidate.
 
 ---
 
-## 1. Two Scoring Contexts
+## 1. In-Thread Matching (Step 1)
+
+**Behavior:** If the message’s `root_thread_ts` matches an open ticket, that ticket is added as a **candidate** with a **sameThread** flag. The message does **not** attach immediately; it continues through Steps 2–3.6 and is scored like any other message.
+
+- **sameThread bonus:** When the thread ticket is the chosen candidate, it gets a small score boost (Step 3.5: +`SAME_THREAD_BONUS`, default 0.12; Step 3.6: +min(0.08, SAME_THREAD_BONUS)).
+- **Relevance over thread:** For **irrelevant** messages (`is_relevant: false`), attachment is allowed only as **context-only** if:
+  - `score >= THREAD_CONTEXT_ONLY_MIN_SCORE` (default 0.60), **and**
+  - at least one of: `overlapCount >= 1`, message matches **status-update** patterns (e.g. "on it", "fixed", "investigating"), or `distance <= 0.30`.
+- **Filler block:** If the message is irrelevant **and** matches **filler** patterns (e.g. "thanks", "ok", "cool", "lol") **and** `overlapCount === 0` **and** it is not a status update, the merge is **blocked** even when sameThread is true (`THREAD_IRRELEVANT_BLOCK`, default true).
+
+So: **relevance and evidence dominate**; same-thread is a bonus, not a pass condition.
+
+**Env:** `SAME_THREAD_BONUS` (default 0.12), `THREAD_IRRELEVANT_BLOCK` (default true), `THREAD_CONTEXT_ONLY_MIN_SCORE` (default 0.60).
+
+---
+
+## 2. Two Scoring Contexts
 
 | Aspect    | **Step 3.5 (Recent Channel)**                       | **Step 3.6 (CCR / Cross-Channel)**        |
 | --------- | --------------------------------------------------- | ----------------------------------------- |
@@ -17,7 +33,7 @@ So: **same-channel recent** uses a **lower** threshold and **more structural bon
 
 ---
 
-## 2. Semantic Similarity (Base)
+## 3. Semantic Similarity (Base)
 
 Both scores start from **cosine distance** between message and ticket (or message) embeddings.
 
@@ -26,7 +42,7 @@ Both scores start from **cosine distance** between message and ticket (or messag
   `similarity = 1 - (distance / 2)`  
   so similarity ∈ [0, 1], clamped.
 
-### 2.1 How Semantic Similarity Is Computed
+### 3.1 How Semantic Similarity Is Computed
 
 **Embeddings**
 
@@ -36,7 +52,7 @@ Both scores start from **cosine distance** between message and ticket (or messag
   textToEmbed = "${category}: ${short_title}\nSignals: ${signalsText}\nMessage: ${messageText}".substring(0, 2000)
   ```
   So the vector represents **category + short title + extracted signals + original message**, which keeps embeddings stable and topic-aware (e.g. "feature_request: CSV export button" plus signals like "csv", "export").
-- **Ticket embedding:** Stored on the ticket when it is created (or updated); same model and dimension. It is the embedding of the **creating message** (with the same enhanced format).
+- **Ticket embedding:** Stored on the ticket when it is created or updated; same model and dimension. The ticket may use **summary_embedding** (title + category + summary + signals) when available; otherwise the **creating-message** embedding. Matching prefers `summary_embedding` for better cross-conversation similarity.
 - **Message embeddings:** Stored on each message row; same model. Used in Step 3 (find similar message) and in CCR (message vector search). Dimension must match (1536).
 
 **Cosine distance (implementation)**
@@ -56,9 +72,9 @@ Vectors must have the same length (1536); the code throws if dimensions differ.
 
 **Where distance comes from**
 
-- **Step 3:** The DB (Supabase/pgvector) does vector search and returns the best ticket or message with a **distance** (e.g. `<=>` in PostgreSQL). That distance is already cosine distance in the same metric as above.
-- **Step 3.5:** The recent ticket’s embedding is loaded from the DB; **cosine distance** is computed in app between the incoming message embedding and the ticket embedding using the function above.
-- **Step 3.6 (CCR):** Candidates come from RPCs that return rows with a **distance** column (again from pgvector). That value is the same cosine distance; the app then uses it in `computeCCRMatchScore` and guardrails.
+- **Step 3:** The DB (Supabase/pgvector) does vector search using `COALESCE(t.summary_embedding, t.embedding)` for tickets and returns the best ticket or message with a **distance** (e.g. `<=>` in PostgreSQL). That distance is already cosine distance in the same metric as above.
+- **Step 3.5:** The recent ticket’s **summary_embedding** (or **embedding**) is loaded from the DB; **cosine distance** is computed in app between the incoming message embedding and that vector.
+- **Step 3.6 (CCR):** Candidates come from RPCs that use `COALESCE(summary_embedding, embedding)` for tickets and return rows with a **distance** column; the app uses it in `computeCCRMatchScore` and guardrails.
 
 So **semantic similarity** in the doc means: embed text with the enhanced format → obtain 1536-d vectors → compare with **cosine distance** (1 − cosine similarity) → then convert distance to a [0, 1] similarity for scoring via `similarity = 1 - (distance / 2)` (clamped).
 
@@ -87,10 +103,10 @@ Design: **embedding is the main signal**, but **structure** (channel, recency, c
 
 ---
 
-## 3. Step 3.5: `computeMatchScore` (Recent Channel)
+## 4. Step 3.5: `computeMatchScore` (Recent Channel)
 
 **Inputs:**  
-`distance`, `sameChannel`, `minutesSinceTicketUpdate`, `categoryCompatibility`, `sameCategory`, `overlapCount`.
+`distance`, `sameChannel`, `minutesSinceTicketUpdate`, `categoryCompatibility`, `sameCategory`, `overlapCount`, `sameThread`.
 
 **Formula (conceptually):**
 
@@ -104,22 +120,18 @@ Design: **embedding is the main signal**, but **structure** (channel, recency, c
 | Structure | Same channel                 | +0.15                                    |
 | Structure | Ticket updated ≤ 10 min ago  | +0.15                                    |
 | Structure | overlapCount ≥ 1             | +0.10                                    |
+| Structure | sameThread                   | +SAME_THREAD_BONUS (default 0.12)        |
 
 **Cap:** `score = min(1.0, score)` (can go negative before cap; then min with 1).
 
-**Typical maxima:**
-
-- Best case: 0.6 (semantic) + 0.10 (same cat) + 0.15 (same channel) + 0.15 (recent) + 0.10 (overlap) = **1.0**.
-- Incompatible category: 0.6 − 0.10 + 0.15 + 0.15 + 0.10 = 0.9 (still mergeable if above 0.65).
-
-So category is a **soft** signal: penalty, not a hard block. Guardrails can still block.
+**Typical maxima:** Best case includes sameThread (+0.12) then capped at **1.0**. Incompatible category still mergeable if above 0.65. sameThread is a bonus, not a pass condition; guardrails (including filler block) can still block.
 
 ---
 
-## 4. Step 3.6: `computeCCRMatchScore` (Cross-Channel)
+## 5. Step 3.6: `computeCCRMatchScore` (Cross-Channel)
 
 **Inputs:**  
-`distance`, `sameCategory`, `categoryCompatibility`, `overlapCount`, `updatedAt`.
+`distance`, `sameCategory`, `categoryCompatibility`, `overlapCount`, `updatedAt`, `sameThread`.
 
 **Formula:**
 
@@ -131,14 +143,15 @@ So category is a **soft** signal: penalty, not a hard block. Guardrails can stil
 | Overlap   | overlapCount ≥ 1          | +0.10                     |
 | Overlap   | overlapCount ≥ 2          | +0.10 (extra)             |
 | Recency   | Ticket updated ≤ 24 h ago | +0.05                     |
+| sameThread| Thread ticket candidate   | +min(SAME_THREAD_BONUS, 0.08) |
 
 **Cap:** `score = max(0, min(1, score))`.
 
-**No same-channel bonus** (by design; CCR is cross-channel). **Recency** is weaker (+0.05, 24 h) than in 3.5 (+0.15, 10 min). **Overlap** is emphasized: 1 overlap = +0.10, 2+ = +0.20 total, so **signal overlap matters more in CCR** to avoid merging on vague semantic match alone.
+**No same-channel bonus** (by design; CCR is cross-channel). **Recency** is weaker (+0.05, 24 h) than in 3.5 (+0.15, 10 min). **Overlap** is emphasized; **sameThread** gives a smaller bonus in CCR (cap 0.08) than in 3.5.
 
 ---
 
-## 5. Category Compatibility (Shared)
+## 6. Category Compatibility (Shared)
 
 Used in **both** scoring paths and in **guardrails**.
 
@@ -176,15 +189,15 @@ Cell = compatibility when **message category** (row) is compared to **ticket cat
 | Sometimes compatible | +0.02          | +0.05 (as compatible) |
 | Incompatible         | −0.10          | 0 (no bonus)          |
 
-Incompatible pairs can still merge when guardrails allow (e.g. strong evidence: same thread, high overlap, or same channel + recent + low distance).
+Incompatible pairs can still merge when guardrails allow (e.g. strong evidence: same thread **with** overlap/status/distance, high overlap, or same channel + recent + low distance).
 
 ---
 
-## 6. Signal Overlap
+## 7. Signal Overlap
 
 **Definition:**  
 Message signals (from classifier) vs ticket signals (from last 5 messages, `normalizeMessage` + entities).  
-Signals are normalized (e.g. strip `feature_`, `platform_`, `error_`, split on underscore) so e.g. `feature_export` and `export` can match.
+Signals are **normalized** with a synonym map (e.g. "rbac", "permission", "authorization" → `access_control`; "super admin" → `superadmin`; "budget page" → `budget`) and prefix stripping (`feature_`, `platform_`, `error_`) so e.g. `feature_export` and `export` can match. Overlap uses these normalized signals; cap length 25.
 
 **Use in scoring:**
 
@@ -195,11 +208,11 @@ So **CCR relies more on overlap** to justify cross-channel merges.
 
 ---
 
-## 7. Guardrails (Pre-Score or Post-Score Blocks)
+## 8. Guardrails (Pre-Score or Post-Score Blocks)
 
 Guardrails can **allow** or **block** a merge regardless of the numeric score.
 
-### 7.1 Step 3.5: `applyGuardrails`
+### 8.1 Step 3.5: `applyGuardrails`
 
 **Allow (strong evidence overrides category):**
 
@@ -214,7 +227,7 @@ Guardrails can **allow** or **block** a merge regardless of the numeric score.
 
 So: with **no** structural evidence (no thread, no overlap, or not same-channel+recent), **incompatible** category + **high distance** → block. With strong evidence (thread, overlap, or same-channel+recent+close), merge is still allowed.
 
-### 7.2 Step 3.5: Topic Guard (After Score)
+### 8.2 Step 3.5: Topic Guard (After Score)
 
 Even if guardrails pass and score ≥ 0.65:
 
@@ -222,7 +235,7 @@ Even if guardrails pass and score ≥ 0.65:
 
 So: high distance + **zero** overlap is treated as "different topic" and overrides the score.
 
-### 7.3 Step 3.6: `applyCCRGuardrails`
+### 8.3 Step 3.6: `applyCCRGuardrails`
 
 **Rare tokens:**  
 Fixed set (e.g. budget, csv, export, rbac, admin, superadmin, 403, 401, 500, invoice, oauth, sso, dashboard, analytics, pdf, report). Used to see if message and ticket share at least one **specific** term.
@@ -243,11 +256,11 @@ So CCR guardrails **block** only when evidence is weak (no overlap, no rare toke
 
 ---
 
-## 8. Gray-Zone and LLM Checks
+## 9. Gray-Zone and LLM Checks
 
 When the score is **near** the threshold (or distance in a "gray" band), an LLM is asked "same underlying issue?" to reduce borderline mistakes.
 
-### 8.1 Step 3.5: `isGrayZone`
+### 9.1 Step 3.5: `isGrayZone`
 
 Trigger **any** of:
 
@@ -257,7 +270,7 @@ Trigger **any** of:
 
 So: **close to threshold** or **distance in middle range + close to threshold** → LLM check. Different category widens the "close" band (0.08 vs 0.05).
 
-### 8.2 Step 3.6: `isCCRGrayZone`
+### 9.2 Step 3.6: `isCCRGrayZone`
 
 Trigger **either**:
 
@@ -266,7 +279,7 @@ Trigger **either**:
 
 So CCR uses a **fixed 0.08 band** below threshold and/or **distance band + at least one overlap** to trigger the LLM.
 
-### 8.3 LLM Decision
+### 9.3 LLM Decision
 
 - **Step 3.5:** `checkLLMMerge` — same-channel merge; prompt stresses "same underlying issue, not same broad topic".
 - **Step 3.6:** `checkCCRLLMMerge` — cross-channel; prompt stresses "more conservative", "clearly same issue across channels".
@@ -275,21 +288,25 @@ Merge only if LLM returns e.g. `should_merge === true` and **confidence ≥ 0.7*
 
 ---
 
-## 9. Decision Rules (How Score + Guardrails Are Used)
+## 10. Decision Rules (How Score + Guardrails Are Used)
 
 **Step 3.5 (recent channel):**
 
-1. Guardrails: if block → do not merge.
+1. Guardrails: if block (including irrelevant filler in thread) → do not merge.
 2. Topic guard: if distance > 0.45 and overlap === 0 → do not merge.
-3. If score ≥ RECENT_CHANNEL_SCORE_THRESHOLD (0.65) → merge.
+3. If score ≥ RECENT_CHANNEL_SCORE_THRESHOLD (0.65):
+   - **If irrelevant:** merge only as context-only when score ≥ THREAD_CONTEXT_ONLY_MIN_SCORE **and** (overlapCount ≥ 1 **or** status-update **or** distance ≤ 0.30); otherwise **drop** (do not attach).
+   - **If relevant:** merge (normal or context-only per options).
 4. Else if gray-zone → LLM; if LLM says merge and confidence ≥ 0.7 → merge.
 5. Else → no merge (continue to 3.6 / 4).
 
 **Step 3.6 (CCR):**
 
-1. For each candidate: CCR guardrails; if block → skip candidate.
-2. Sort by score; take best.
-3. If score ≥ SCORE_THRESHOLD (0.75) **or** (overlapCount ≥ 2 and distance ≤ 0.45 and score ≥ 0.65) → merge.
+1. For each candidate (including thread candidate when applicable): CCR guardrails; if block → skip candidate.
+2. Sort by score; take best. Log top 5 with sameThread flag.
+3. If score ≥ SCORE_THRESHOLD (0.75) **or** (overlapCount ≥ 2 and distance ≤ 0.45 and score ≥ 0.65):
+   - **If irrelevant:** merge only as context-only when score ≥ THREAD_CONTEXT_ONLY_MIN_SCORE **and** (overlapCount ≥ 1 **or** status-update **or** distance ≤ 0.30); otherwise **drop**.
+   - **If relevant:** merge.
 4. Else if CCR gray-zone → CCR LLM; if merge and confidence ≥ 0.7 → merge.
 5. Else → no merge (Step 4).
 
@@ -300,24 +317,25 @@ So:
 
 ---
 
-## 10. Design Summary and Tradeoffs
+## 11. Design Summary and Tradeoffs
 
 **Design choices:**
 
+- **In-thread = scored, not auto-attach:** Thread replies get a sameThread bonus but must pass score + guardrails; relevance and evidence dominate. Filler in thread can be blocked.
+- **Summary embedding:** Matching prefers `summary_embedding` (title + category + summary + signals) over initial-message `embedding` for better cross-conversation matching.
 - **Semantic weight ~55–60%:** Embedding is primary but not sole signal.
-- **Structure (channel, recency, overlap, category):** Prevents over-reliance on embeddings and encodes "same conversation" vs "same topic".
+- **Structure (channel, recency, overlap, category, sameThread):** Prevents over-reliance on embeddings.
 - **Two thresholds:** Stricter for cross-channel (0.75) than same-channel recent (0.65).
-- **Category as soft signal:** Penalty for incompatible, not a hard rule; guardrails add a hard block only when evidence is weak.
-- **Guardrails:** Block only when evidence is weak (no overlap, no rare tokens, high distance, incompatible category where applicable).
+- **Category as soft signal:** Penalty for incompatible; guardrails (including **filler block** for irrelevant thread messages) add hard blocks when evidence is weak.
 - **Topic guard (3.5):** Stops "same channel + recent but different topic" (high distance, zero overlap).
-- **Rare tokens (CCR):** Require either overlap, or strong semantics, or shared specific terms to allow cross-channel merge.
-- **Gray-zone LLM:** Reduces false merges and false splits near threshold; stricter prompt for cross-channel.
+- **Rare tokens (CCR):** Require overlap, strong semantics, or shared specific terms for cross-channel merge.
+- **Gray-zone LLM:** Tie-breaker near threshold; stricter prompt for cross-channel.
 
 **Tradeoffs:**
 
-- **Tunable:** All thresholds and many weights are env-driven (e.g. SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, gray-zone bands, RECENT_WINDOW_MINUTES). Raising thresholds → fewer merges; lowering → more.
-- **Overlap weight:** In CCR, overlap has large impact (+0.20 for 2+). If your signals are noisy, you may merge or split more than intended.
-- **Rare-token set:** Fixed list; domain-specific terms might need to be added for better CCR behavior.
-- **Recency:** 10 min (3.5) vs 24 h (3.6) makes "recent" much stricter in same-channel than in CCR, which is intentional.
+- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, gray-zone bands, RECENT_WINDOW_MINUTES. Raising thresholds → fewer merges.
+- **Overlap + normalization:** Signal overlap uses normalized synonyms; CCR overlap has large impact (+0.20 for 2+). Noisy signals can increase merges/splits.
+- **Rare-token set:** Fixed list; add domain terms if needed for CCR.
+- **Recency:** 10 min (3.5) vs 24 h (3.6) in CCR is intentional.
 
-Overall, the scoring system is a **multi-factor, threshold-based** design with **evidence-based guardrails** and **LLM gray-zone** checks to keep merges aligned with "same underlying issue" rather than "same broad topic" or single high embedding similarity.
+Overall, the system is **multi-factor, threshold-based** with **evidence-based guardrails** (including **irrelevant filler block** for thread messages) and **LLM gray-zone** checks so merges stay aligned with "same underlying issue."
