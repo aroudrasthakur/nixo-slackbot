@@ -267,21 +267,27 @@ Login on mobile still broken btw.
 
 You should see exactly four tickets:
 
-1. Login broken on mobile Safari
+1. **Login broken on mobile Safari**
 
    - Messages from #acme-bugs and #acme-onboarding
-   - Multiple customers
-   - Grouped by semantic similarity
+   - De-duplicated across time
 
-2. Export audit logs to CSV
+2. **Dashboard performance degradation**
 
-   - Messages from #acme-feature-requests
-   - Clearly marked as feature request
+   - Messages from #acme-support
+   - Thread context preserved
 
-3. Webhooks failing with 401
+3. **Webhooks failing with 401**
 
-   - Messages from #acme-support thread and #acme-bugs
-   - Demonstrates de-duplication
+   - Failures and delayed retries
+   - Grouped across channels
+
+4. **Export audit logs to CSV**
+
+   - Feature request cluster
+
+5. **Webhook retry visibility dashboard**
+   - Feature request separate from bug
 
 Ignored:
 
