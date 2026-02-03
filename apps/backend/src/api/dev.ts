@@ -45,7 +45,9 @@ router.post('/ingest', async (req, res) => {
     );
 
     // Emit socket event
-    emitTicketUpdated(ticketId);
+    if (ticketId) {
+      emitTicketUpdated(ticketId);
+    }
 
     res.json({ ticketId, classification });
   } catch (error: any) {

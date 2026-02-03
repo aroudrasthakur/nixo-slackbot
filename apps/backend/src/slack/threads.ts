@@ -37,7 +37,7 @@ export async function getThreadContext(
         // Exclude current message
         if (msg.ts === currentTs) return false;
         // Exclude bot messages
-        if (msg.subtype === 'bot_message' || (msg as any).bot_id) return false;
+        if ((msg as { subtype?: string; bot_id?: string }).subtype === 'bot_message' || (msg as { bot_id?: string }).bot_id) return false;
         // Only include messages before current
         return msg.ts && parseFloat(msg.ts) < parseFloat(currentTs);
       })
@@ -81,9 +81,10 @@ export async function getChannelHistory(
     return result.messages
       .filter((msg) => {
         // Exclude bot messages
-        if (msg.subtype === 'bot_message' || (msg as any).bot_id) return false;
+        const m = msg as { subtype?: string; bot_id?: string; thread_ts?: string; ts?: string };
+        if (m.subtype === 'bot_message' || m.bot_id) return false;
         // Exclude thread replies (only include top-level channel messages)
-        if ((msg as any).thread_ts && (msg as any).thread_ts !== msg.ts) return false;
+        if (m.thread_ts && m.thread_ts !== m.ts) return false;
         return true;
       })
       .map((msg) => ({

@@ -10,10 +10,9 @@ Slack (Socket Mode) → Bolt → Pipeline → DB → Socket.IO → Next.js UI
 
 **Realtime Flow**: Slack events → Bolt (Socket Mode) → Message pipeline → Supabase → Socket.IO broadcast → Next.js UI
 
-**Documentation:**
+**Documentation:** [docs/SCORING_SYSTEM.md](docs/SCORING_SYSTEM.md) — Grouping formulas, guardrails, redundancy, summary structure.
 
-- [docs/SCORING_SYSTEM.md](docs/SCORING_SYSTEM.md) — Grouping formulas, guardrails, redundancy
-- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — Realtime, grouping, de-duplication, security
+**Race-condition prevention:** Messages from all channels are processed sequentially via a global queue, so concurrent messages never fail to see each other's tickets (including cross-channel CCR).
 
 ---
 
@@ -172,6 +171,8 @@ Set each variable:
 _Note: Legacy variables like `SIMILARITY_THRESHOLD` are preserved for backward compatibility but superseded by score thresholds._
 
 ### 7. Run the application
+
+**Local development:** No tunnel required. Slack uses Socket Mode (the app connects out to Slack), so the backend can run on localhost.
 
 From the project root:
 
@@ -355,7 +356,7 @@ When a new Slack message arrives, it goes through a multi-step matching process.
 ## Troubleshooting
 
 - **Bot not receiving events**: Check Socket Mode and `message.channels` scope.
-- **Realtime updates not appearing**: Ensure `NEXT_PUBLIC_SOCKET_URL` points to the backend. Socket.IO uses WebSocket-only transport; if connection fails (e.g. restrictive proxy), add `'polling'` to `transports` in `apps/web/src/lib/socket.ts`.
+- **Realtime updates not appearing**: Ensure `NEXT_PUBLIC_SOCKET_URL` points to the backend. Socket.IO uses WebSocket only (no polling). If connection fails behind a restrictive proxy, you may need to add `'polling'` to `transports` in `apps/web/src/lib/socket.ts` as a fallback.
 - **Missing scopes**: Reinstall app after adding `channels:history`.
 - **Dashboard blank**: Ensure you are at `/dashboard` or `/dashboard/tickets`, the backend is running, and Cognito env vars are set.
 - **Sign-in / sign-up fails**: Check `NEXT_PUBLIC_COGNITO_USER_POOL_ID`, `NEXT_PUBLIC_COGNITO_CLIENT_ID`, and `NEXT_PUBLIC_COGNITO_REGION`; ensure the app client was created without a secret (public client).

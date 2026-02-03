@@ -1,4 +1,3 @@
-import type { GenericMessageEvent } from '@slack/bolt';
 import { boltApp } from './bolt';
 import { shouldProcessMessage } from '../pipeline/filter';
 import { classifyMessage } from '../pipeline/classify';
@@ -27,10 +26,7 @@ let globalQueue: Promise<void> = Promise.resolve();
  * Queue a message for processing. All messages are processed sequentially,
  * regardless of channel, so no race condition can occur.
  */
-function queueMessageProcessing(
-  _channelId: string,
-  processFn: () => Promise<void>
-): void {
+function queueMessageProcessing(processFn: () => Promise<void>): void {
   const previous = globalQueue;
   globalQueue = previous
     .then(processFn)
@@ -44,10 +40,10 @@ export function setupSlackHandlers() {
   boltApp.message(async ({ message, event, say, ack }) => {
     // Message events don't always provide ack in Bolt v3 - only call if available
     if (typeof ack === 'function') {
-      await ack();
+      await (ack as () => Promise<void>)();
     }
 
-    const msg = message as GenericMessageEvent;
+    const msg = message as { channel: string; ts: string; user?: string; text?: string; subtype?: string; bot_id?: string; thread_ts?: string };
 
     // Skip bot messages
     if (msg.subtype === 'bot_message' || msg.bot_id) {
@@ -104,7 +100,7 @@ export function setupSlackHandlers() {
 
     // Message events don't always provide ack in Bolt v3 - only call if available
     if (typeof ack === 'function') {
-      await ack();
+      await (ack as () => Promise<void>)();
     }
 
     // Update existing message if text changed
