@@ -10,6 +10,11 @@ Slack (Socket Mode) → Bolt → Pipeline → DB → Socket.IO → Next.js UI
 
 **Realtime Flow**: Slack events → Bolt (Socket Mode) → Message pipeline → Supabase → Socket.IO broadcast → Next.js UI
 
+**Documentation:**
+
+- [docs/SCORING_SYSTEM.md](docs/SCORING_SYSTEM.md) — Grouping formulas, guardrails, redundancy
+- [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md) — Realtime, grouping, de-duplication, security
+
 ---
 
 ## Prerequisites
@@ -350,6 +355,7 @@ When a new Slack message arrives, it goes through a multi-step matching process.
 ## Troubleshooting
 
 - **Bot not receiving events**: Check Socket Mode and `message.channels` scope.
+- **Realtime updates not appearing**: Ensure `NEXT_PUBLIC_SOCKET_URL` points to the backend. Socket.IO uses WebSocket-only transport; if connection fails (e.g. restrictive proxy), add `'polling'` to `transports` in `apps/web/src/lib/socket.ts`.
 - **Missing scopes**: Reinstall app after adding `channels:history`.
 - **Dashboard blank**: Ensure you are at `/dashboard` or `/dashboard/tickets`, the backend is running, and Cognito env vars are set.
 - **Sign-in / sign-up fails**: Check `NEXT_PUBLIC_COGNITO_USER_POOL_ID`, `NEXT_PUBLIC_COGNITO_CLIENT_ID`, and `NEXT_PUBLIC_COGNITO_REGION`; ensure the app client was created without a secret (public client).

@@ -13,37 +13,28 @@ import { getCrossChannelContext } from '../db/messages';
 const FDE_USER_ID = process.env.FDE_USER_ID;
 
 /**
- * Per-channel message queue to serialize processing.
- * This prevents race conditions where concurrent messages in the same channel
- * don't find each other's tickets because they're being processed simultaneously.
+ * Global message queue to serialize processing across ALL channels.
+ * Prevents race conditions where concurrent messages (same or different channels)
+ * fail to see each other's tickets because they're being processed simultaneously.
+ * Cross-channel tickets (CCR) require this: a message in #support might relate to
+ * a ticket from #general that's still being created.
  */
-const channelQueues = new Map<string, Promise<void>>();
+let globalQueue: Promise<void> = Promise.resolve();
 
 /**
- * Queue a message for processing, ensuring messages in the same channel
- * are processed sequentially while different channels can process in parallel.
+ * Queue a message for processing. All messages are processed sequentially,
+ * regardless of channel, so no race condition can occur.
  */
 function queueMessageProcessing(
-  channelId: string,
+  _channelId: string,
   processFn: () => Promise<void>
 ): void {
-  const currentQueue = channelQueues.get(channelId) || Promise.resolve();
-  
-  const newQueue = currentQueue
+  const previous = globalQueue;
+  globalQueue = previous
     .then(processFn)
     .catch((error) => {
       console.error('[Pipeline] Error processing queued message:', error);
     });
-  
-  channelQueues.set(channelId, newQueue);
-  
-  // Clean up completed queues to prevent memory leaks
-  newQueue.finally(() => {
-    // Only delete if this is still the current queue (no new messages queued)
-    if (channelQueues.get(channelId) === newQueue) {
-      channelQueues.delete(channelId);
-    }
-  });
 }
 
 export function setupSlackHandlers() {
@@ -85,8 +76,8 @@ export function setupSlackHandlers() {
       return;
     }
 
-    // Queue message for sequential processing per channel
-    // This prevents race conditions where concurrent messages don't find each other's tickets
+    // Queue message for sequential processing (global, all channels)
+    // Prevents race conditions where concurrent messages fail to see each other's tickets
     const messagePayload = {
       slack_channel_id: msg.channel,
       slack_ts: msg.ts,
@@ -99,7 +90,7 @@ export function setupSlackHandlers() {
       is_fde: isFdeMessage,
     };
     
-    queueMessageProcessing(msg.channel, () => processMessageAsync(messagePayload));
+    queueMessageProcessing(() => processMessageAsync(messagePayload));
   });
 
   // Optional: Handle message edits

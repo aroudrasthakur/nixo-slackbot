@@ -53,6 +53,7 @@ Both scores start from **cosine distance** between message and ticket (or messag
   ```
   So the vector represents **category + short title + extracted signals + original message**, which keeps embeddings stable and topic-aware (e.g. "feature_request: CSV export button" plus signals like "csv", "export").
 - **Ticket embedding:** Stored on the ticket when it is created or updated; same model and dimension. The ticket may use **summary_embedding** (title + category + summary + signals) when available; otherwise the **creating-message** embedding. Matching prefers `summary_embedding` for better cross-conversation similarity.
+- **Summary structure (JSONB):** `description`, `action_items`, `technical_details`, `priority_hint` (see migration 004).
 - **Message embeddings:** Stored on each message row; same model. Used in Step 3 (find similar message) and in CCR (message vector search). Dimension must match (1536).
 
 **Cosine distance (implementation)**
