@@ -20,6 +20,7 @@ export const ClassificationResultSchema = z.object({
 });
 
 export const TicketSummarySchema = z.object({
+  short_title: z.string(),
   description: z.string(),
   action_items: z.array(z.string()),
   technical_details: z.string().nullable(),

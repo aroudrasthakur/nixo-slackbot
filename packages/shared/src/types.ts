@@ -8,6 +8,7 @@ export type TicketCategory =
   | 'irrelevant';
 
 export interface TicketSummary {
+  short_title: string;
   description: string;
   action_items: string[];
   technical_details: string | null;

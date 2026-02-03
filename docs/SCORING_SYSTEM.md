@@ -220,46 +220,69 @@ Color tokens alone are not treated as primary overlap evidence unless paired wit
 ## 8. Redundancy Detection (Same Meaning Collapse)
 
 **Overview:**  
-Redundancy detection runs **after** a ticket is chosen (post-merge step). A message can be relevant and still be hidden if it repeats the same intent as a prior message in the ticket.
+Redundancy detection runs **after** a ticket is chosen (post-merge step). A message can be relevant and still be hidden if it repeats the same intent or essence as a prior message in the ticket.
 
 **When it runs:**  
 After Steps 1-3.6 or Step 4 (create) determine the target ticket, but before `upsertMessage` stores the message.
 
+**Flow (insertMessageWithRedundancyCheck):**
+
+1. Compute intent fingerprint
+2. **Ensure incoming embedding exists** — compute via OpenAI if missing (same enhanced format as Step 3)
+3. **Identity de-dupe** — if message already exists by `channel_id` + `slack_ts`, return early (duplicate Slack event)
+4. Fetch prior visible messages (`REDUNDANT_LOOKBACK`)
+5. **Backfill prior embeddings** — for priors without embedding, compute and persist via `updateMessageEmbedding`
+6. Run redundancy check (Path A then Path B fallback)
+7. Store message with `is_redundant`, `redundant_of_message_id`
+8. Skip summary refresh when redundant
+
 **Fields:**
 
 - `is_redundant`: boolean flag indicating if message is redundant
-- `redundant_of_message_id`: UUID reference to the first message that established this intent
+- `redundant_of_message_id`: UUID reference to the first (most recent) message that established this intent/essence
 - `intent_key`: composite key `${intent_action}|${intent_object}|${intent_value ?? "*"}`
 - `intent_action`: style_change, access_control, add_feature, bug, etc.
-- `intent_object`: REQUIRED primary object (button, dashboard, navbar, etc.)
+- `intent_object`: REQUIRED for intent_key; primary object (button, dashboard, navbar, etc.)
 - `intent_value`: color (for style_change), role (for access_control), etc.
 
 **Intent Key Format:**  
 Format: `${intent_action}|${intent_object}|${intent_value ?? "*"}`
 
-**Critical Rule:** `intent_object` is **mandatory**. If missing, `intent_key` is `null` and redundancy check is skipped. This ensures color words alone cannot group messages across different UI components.
+**Critical Rule:** `intent_object` is **mandatory** for `intent_key`. If missing, `intent_key` is `null`; Path B (essence) can still run as fallback.
 
 **Examples:**
 
 - "make the button blue" → `intent_key = "style_change|button|blue"`
-- "ensure the button is blue" → `intent_key = "style_change|button|blue"` → **redundant** (same intent_key)
-- "make the dashboard blue" → `intent_key = "style_change|dashboard|blue"` → **NOT redundant** (different intent_object)
+- "ensure the button is blue" → `intent_key = "style_change|button|blue"` → **redundant** (Path A)
+- "login fails" vs "login does not work" → **redundant** via Path B (essence, Tier 1 or Tier 2)
+- "login fails" vs "export fails" → **NOT redundant** (gate or addsNewInfoEssence blocks)
 
-**Redundancy Detection Logic:**
+**Path A (intent-key match):**  
+Runs when incoming has `intent_key`. For each prior with matching `intent_key`: distance ≤ 0.18 and `!checkAddsNewInfo` → redundant.
 
-1. Compute `intent_key` for incoming message using `computeIntentFingerprint`.
-2. Fetch last `REDUNDANT_LOOKBACK` (default 20) visible messages (`is_redundant=false`) for the ticket, ordered by `created_at DESC`.
-3. For each prior message:
+**Path B (essence-based fallback):**  
+Runs only when Path A finds no match (incoming `intent_key` null, or no prior matches). **Not** always-on when `intent_key` exists.
 
-- If `intent_key` matches AND
-- Semantic distance ≤ `REDUNDANT_DISTANCE_THRESHOLD` (default 0.18) AND
-- No new information added (see override rules)
-- Then mark incoming as redundant.
+**Path B Essence Gate:**  
+Path B requires at least one of: `overlapCount >= 1`, `rareTokenOverlap`, or `tokenCount <= 10`. Prevents collapsing "login fails" with "export fails".
 
-**"Adds new info" Override:**  
+**Path B Two-Tier Thresholds:**
+
+- **Tier 1 (precision):** distance ≤ 0.15 and `!addsNewInfoEssence` → redundant
+- **Tier 2 (recall):** distance ≤ 0.20 AND token Jaccard ≥ 0.60 and `!addsNewInfoEssence` → redundant
+
+**addsNewInfoEssence (Path B):**  
+Returns true (NOT redundant) if incoming introduces a new hard signal not in prior:
+
+- Platform tokens: ios, android, web, safari, mobile, desktop
+- Error codes: 401, 403, 500, etc.
+- Core subsystem tokens: webhook, export, csv, sso, oauth, login, dashboard, budget, invoice, rbac, admin, superadmin
+- Urgency words: asap, tonight, today, urgent, critical, immediately
+
+**"Adds new info" Override (Path A):**  
 Even if `intent_key` matches, treat as **NOT redundant** if:
 
-- Contains new platform (ios/android/web) not in ticket signals
+- Contains new platform (ios/android/web) not in prior
 - Contains error codes/endpoints not already present
 - Introduces urgency/deadline words (asap, tonight, critical)
 - Changes `intent_value` (e.g., blue → red)
@@ -278,8 +301,11 @@ Even if `intent_key` matches, treat as **NOT redundant** if:
 
 **Configuration:**
 
-- `REDUNDANT_DISTANCE_THRESHOLD` (default 0.18): maximum embedding distance for redundancy
+- `REDUNDANT_DISTANCE_THRESHOLD` (default 0.18): Path A max embedding distance
 - `REDUNDANT_LOOKBACK` (default 20): number of prior messages to check
+- `REDUNDANT_ESSENCE_THRESHOLD` (default 0.15): Path B Tier 1 max distance
+- `REDUNDANT_ESSENCE_THRESHOLD_2` (default 0.20): Path B Tier 2 max distance (requires Jaccard)
+- `ESSENCE_JACCARD_MIN` (default 0.60): Path B Tier 2 min token Jaccard
 
 ---
 
@@ -412,10 +438,10 @@ So:
 
 **Tradeoffs:**
 
-- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, REDUNDANT_DISTANCE_THRESHOLD, REDUNDANT_LOOKBACK, gray-zone bands (SIMILARITY_GRAYZONE_LOW, SIMILARITY_GRAYZONE_HIGH), RECENT_WINDOW_MINUTES, CROSS_CHANNEL_DAYS (default 14), MATCH_TOPK_TICKETS (default 15), MATCH_TOPK_MESSAGES (default 25). Raising thresholds → fewer merges.
+- **Tunable:** Thresholds and weights are env-driven: SCORE_THRESHOLD, RECENT_CHANNEL_SCORE_THRESHOLD, SAME_THREAD_BONUS, THREAD_IRRELEVANT_BLOCK, THREAD_CONTEXT_ONLY_MIN_SCORE, REDUNDANT_DISTANCE_THRESHOLD, REDUNDANT_LOOKBACK, REDUNDANT_ESSENCE_THRESHOLD, REDUNDANT_ESSENCE_THRESHOLD_2, ESSENCE_JACCARD_MIN, gray-zone bands (SIMILARITY_GRAYZONE_LOW, SIMILARITY_GRAYZONE_HIGH), RECENT_WINDOW_MINUTES, CROSS_CHANNEL_DAYS (default 14), MATCH_TOPK_TICKETS (default 15), MATCH_TOPK_MESSAGES (default 25). Raising thresholds → fewer merges.
 - **Overlap + normalization:** Signal overlap uses normalized synonyms; CCR overlap has large impact (+0.20 for 2+). Noisy signals can increase merges/splits.
 - **Rare-token set:** Fixed list; add domain terms if needed for CCR.
 - **Recency:** 10 min (3.5) vs 24 h (3.6) in CCR is intentional.
-- **Redundancy:** Post-merge optimization; does not affect scoring or merge decisions. Redundant messages preserved for audit but hidden by default.
+- **Redundancy:** Post-merge optimization; Path A (intent_key match) + Path B (essence fallback with gate, two-tier thresholds, addsNewInfoEssence). Identity de-dupe and embedding backfill before redundancy. Redundant messages preserved for audit but hidden by default.
 
 Overall, the system is **multi-factor, threshold-based** with **evidence-based guardrails** (including **irrelevant filler block** for thread messages) and **LLM gray-zone** checks so merges stay aligned with "same underlying issue."
