@@ -28,6 +28,7 @@ interface SummarizeConversationInput {
 }
 
 const DEFAULT_SUMMARY: TicketSummary = {
+  short_title: '',
   description: '',
   action_items: [],
   technical_details: null,
@@ -86,10 +87,11 @@ Reporter: ${reporterUsername || 'Unknown'}
 Assignees: ${assignees.length > 0 ? assignees.join(', ') : 'None assigned'}
 
 Generate a summary with:
-1. description: A brief 1-2 sentence summary of what the ticket is about
-2. action_items: An array of specific, actionable items that need to be done (e.g., "Fix login page crash", "Add dark mode toggle")
-3. technical_details: Any relevant technical information mentioned (error codes, stack traces, file names, code snippets). Set to null if none.
-4. priority_hint: Estimate priority based on severity and impact:
+1. short_title: A concise ticket title (max ~60 chars) capturing the main request or issue
+2. description: A brief 1-2 sentence summary of what the ticket is about
+3. action_items: An array of specific, actionable items that need to be done (e.g., "Fix login page crash", "Add dark mode toggle")
+4. technical_details: Any relevant technical information mentioned (error codes, stack traces, file names, code snippets). Set to null if none.
+5. priority_hint: Estimate priority based on severity and impact:
    - "critical": Production down, security issue, data loss
    - "high": Major feature broken, many users affected
    - "medium": Regular bug or feature request
@@ -110,6 +112,7 @@ Be concise and actionable. Extract specific technical details when present.`,
             schema: {
               type: 'object',
               properties: {
+                short_title: { type: 'string' },
                 description: { type: 'string' },
                 action_items: { type: 'array', items: { type: 'string' } },
                 technical_details: { type: ['string', 'null'] },
@@ -118,7 +121,7 @@ Be concise and actionable. Extract specific technical details when present.`,
                   enum: ['low', 'medium', 'high', 'critical'],
                 },
               },
-              required: ['description', 'action_items', 'technical_details', 'priority_hint'],
+              required: ['short_title', 'description', 'action_items', 'technical_details', 'priority_hint'],
               additionalProperties: false,
             },
           },
@@ -140,6 +143,7 @@ Be concise and actionable. Extract specific technical details when present.`,
       // Return a basic summary as fallback
       return {
         ...DEFAULT_SUMMARY,
+        short_title: classification.short_title || text.substring(0, 60),
         description: classification.short_title || text.substring(0, 100),
         action_items: classification.category !== 'irrelevant' 
           ? [`Review ${classification.category.replace(/_/g, ' ')}`] 
@@ -165,6 +169,7 @@ export async function generateTicketSummaryFromConversation(
   if (!conversationText.trim()) {
     return {
       ...DEFAULT_SUMMARY,
+      short_title: ticketTitle,
       description: ticketTitle,
       action_items: [],
     };
@@ -189,10 +194,11 @@ The conversation below includes all messages. Summarize the ENTIRE thread, not j
 - If the latest messages add new bugs, requests, or technical details, include them in the summary.
 
 Generate a summary with:
-1. description: A brief 1-2 sentence summary of what the ticket is about (reflect the full conversation)
-2. action_items: An array of specific, actionable items (fixes, feature requests, follow-ups). Merge and deduplicate from the whole thread.
-3. technical_details: Any relevant technical information from any message (error codes, stack traces, file names). Set to null if none.
-4. priority_hint: Re-estimate priority based on the FULL conversation. When messages have similar content but varying urgency, the ticket should reflect the HIGHEST or most recent urgency:
+1. short_title: A concise ticket title (max ~60 chars) reflecting the full conversation. Update if new messages change the scope.
+2. description: A brief 1-2 sentence summary of what the ticket is about (reflect the full conversation)
+3. action_items: An array of specific, actionable items (fixes, feature requests, follow-ups). Merge and deduplicate from the whole thread.
+4. technical_details: Any relevant technical information from any message (error codes, stack traces, file names). Set to null if none.
+5. priority_hint: Re-estimate priority based on the FULL conversation. When messages have similar content but varying urgency, the ticket should reflect the HIGHEST or most recent urgency:
    - If a newer message adds urgency (e.g. "by tonight", "ASAP", "critical", "blocking"), set priority to match that higher urgency.
    - "critical": Production down, security issue, data loss
    - "high": Major feature broken, many users affected, tight deadlines ("by tonight", "urgent")
@@ -215,6 +221,7 @@ Be concise and actionable. Reflect the complete conversation.`,
             schema: {
               type: 'object',
               properties: {
+                short_title: { type: 'string' },
                 description: { type: 'string' },
                 action_items: { type: 'array', items: { type: 'string' } },
                 technical_details: { type: ['string', 'null'] },
@@ -223,7 +230,7 @@ Be concise and actionable. Reflect the complete conversation.`,
                   enum: ['low', 'medium', 'high', 'critical'],
                 },
               },
-              required: ['description', 'action_items', 'technical_details', 'priority_hint'],
+              required: ['short_title', 'description', 'action_items', 'technical_details', 'priority_hint'],
               additionalProperties: false,
             },
           },
@@ -244,6 +251,7 @@ Be concise and actionable. Reflect the complete conversation.`,
       console.error('OpenAI conversation summarization error:', error);
       return {
         ...DEFAULT_SUMMARY,
+        short_title: ticketTitle,
         description: ticketTitle,
         action_items: [],
       };

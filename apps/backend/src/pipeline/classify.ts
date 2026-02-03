@@ -117,9 +117,10 @@ RELEVANT messages include:
 - Bug reports: Errors, crashes, broken features, unexpected behavior (e.g., "The login button doesn't work on mobile")
 - Support questions: How-to questions, troubleshooting requests, configuration issues
 - Feature requests: Suggestions for new functionality or improvements (e.g., "Can you add export to CSV?")
+- Style/UI requests: Requests to change colors, styling, or appearance (e.g., "make it blue", "change the button color to red", "make sure it is blue"). These are feature requests even if short.
 - Product questions: Questions about product capabilities, limitations, or usage
 - Follow-up messages: Short clarifications, additional details, or confirmations that reference a previous request/question
-- Indirect references: Messages using pronouns like "it", "that", "this" that refer to a feature, bug, or issue mentioned in context
+- Indirect references: Messages using pronouns like "it", "that", "this", "the button", "the feature" that refer to a feature, bug, or issue mentioned in context. CRITICAL: When context mentions a UI element (button, dashboard, etc.) and the message uses "it" or "that" with a color/style verb (make, change, ensure, set), resolve the pronoun and mark as RELEVANT feature_request.
 
 IRRELEVANT messages include:
 - Casual conversation: greetings, thanks, small talk, off-topic chat
@@ -133,6 +134,8 @@ Guidelines:
   * Pronouns like "it", "that", "this", "the button", "the feature" may refer to something in recent messages
   * A short message may be a follow-up to a recent discussion even without explicit threading
   * Look for continuity: is this message continuing a relevant conversation from the last few messages?
+  * STYLE REQUESTS: If context mentions a UI element (e.g., "export button", "dashboard", "login form") and the message contains style verbs (make, change, ensure, set) + color words (blue, red, green, etc.), resolve "it"/"that" to the UI element and mark as RELEVANT feature_request
+  * PRONOUN RESOLUTION: Scan channel context backwards from most recent. If a message says "make it blue" and context has "export button" or "CSV export", resolve "it" = "export button" → RELEVANT
 - When in doubt, mark as RELEVANT if the message describes a problem, asks a question, requests something, OR provides context/clarification
 - Be lenient: if a message could be a support request (even if unclear), mark it as relevant
 - Only mark as irrelevant if the message is clearly casual conversation or acknowledgment with no actionable content AND no relevant context connection
@@ -147,6 +150,8 @@ Return a structured response with:
   - GOOD: "User cannot find CSV export button" (specific, uses context)
   - BAD: "Problem with login" (generic)
   - GOOD: "SSO login fails after password reset" (specific)
+  - BAD: "Make it blue" (vague, no context)
+  - GOOD: "Make export button blue" (resolves pronoun from context)
   The short_title is used for ticket grouping, so vague titles prevent related messages from being grouped together.
 - signals: Array of SPECIFIC keywords extracted from BOTH the message AND context. Include:
   * Feature names (e.g., "export", "CSV", "login", "dashboard")

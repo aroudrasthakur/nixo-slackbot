@@ -17,6 +17,11 @@ export const boltApp = new App({
   appToken,
   socketMode: true,
   signingSecret, // Optional but recommended
+  // Increase ping timeout to reduce warnings (default is 5000ms)
+  // This is harmless - connection will auto-reconnect if needed
+  socketModeOptions: {
+    clientPingTimeout: 10000, // 10 seconds instead of 5
+  },
 });
 
 // Log every event from Slack to the terminal
