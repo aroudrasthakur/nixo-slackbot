@@ -45,6 +45,12 @@ export async function upsertMessage(data: MessageInsert): Promise<Message> {
     permalink: data.permalink ?? null,
     embedding: data.embedding ?? null,
     is_context_only: data.is_context_only ?? false,
+    is_redundant: data.is_redundant ?? false,
+    redundant_of_message_id: data.redundant_of_message_id ?? null,
+    intent_key: data.intent_key ?? null,
+    intent_object: data.intent_object ?? null,
+    intent_action: data.intent_action ?? null,
+    intent_value: data.intent_value ?? null,
   };
 
   const { data: message, error } = await supabase
@@ -140,6 +146,20 @@ export async function getMessageBySlackId(
   }
 
   return data as Message;
+}
+
+/**
+ * Update embedding for a message. Used when backfilling missing embeddings for redundancy comparison.
+ */
+export async function updateMessageEmbedding(messageId: string, embedding: number[]): Promise<void> {
+  const { error } = await supabase
+    .from('messages')
+    .update({ embedding })
+    .eq('id', messageId);
+
+  if (error) {
+    throw new Error(`Failed to update message embedding: ${error.message}`);
+  }
 }
 
 export async function updateMessageText(

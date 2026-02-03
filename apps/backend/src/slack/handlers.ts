@@ -9,6 +9,8 @@ import { getSlackUsername } from './users.js';
 import { getThreadContext, getChannelHistory } from './threads.js';
 import { getOpenAIEmbedding } from '../db/client';
 import { getCrossChannelContext } from '../db/messages';
+import { findSimilarTicket } from '../db/tickets';
+import { findSimilarMessage } from '../db/messages';
 
 const FDE_USER_ID = process.env.FDE_USER_ID;
 
@@ -183,7 +185,7 @@ async function processMessageAsync(messageData: {
     }
 
     // Classify with thread context, channel context, and cross-channel context
-    const classification = await classifyMessage(
+    let classification = await classifyMessage(
       messageData.text,
       normalized.normalizedText,
       threadContext,
@@ -199,6 +201,74 @@ async function processMessageAsync(messageData: {
       has_thread_context: !!threadContext && threadContext.messages.length > 0,
       has_channel_context: !!channelContext && channelContext.messages.length > 0,
     });
+
+    // Post-classification fallback: if classified as irrelevant but matches existing ticket semantically, reclassify
+    if (!classification.is_relevant && (channelContext || threadContext)) {
+      try {
+        // Check if this is a style/color request (more likely to be misclassified)
+        const normalizedLower = normalized.normalizedText.toLowerCase();
+        const styleVerbs = ['make', 'change', 'set', 'ensure', 'update', 'switch', 'turn'];
+        const colorWords = ['blue', 'red', 'green', 'purple', 'yellow', 'orange', 'pink', 'black', 'white', 'gray', 'grey', 'color', 'colour'];
+        const isStyleRequest = styleVerbs.some(v => normalizedLower.includes(v)) && colorWords.some(c => normalizedLower.includes(c));
+        
+        const embedding = await getOpenAIEmbedding(messageData.text);
+        // More lenient threshold for style requests (0.30) vs regular (0.25)
+        const similarityThreshold = isStyleRequest ? 0.30 : 0.25;
+        const similarTicket = await findSimilarTicket(embedding, 14, similarityThreshold);
+        const similarMessage = await findSimilarMessage(embedding, 14, similarityThreshold);
+        
+        const bestMatch = similarTicket && similarMessage
+          ? (similarTicket.distance <= similarMessage.distance ? similarTicket : similarMessage)
+          : (similarTicket ?? similarMessage ?? null);
+        
+        if (bestMatch && bestMatch.distance <= similarityThreshold) {
+          console.log('[Pipeline] Post-classification fallback: Irrelevant message matches existing ticket semantically, reclassifying as relevant', {
+            ticketId: bestMatch.ticketId,
+            distance: bestMatch.distance.toFixed(4),
+            originalCategory: classification.category,
+            isStyleRequest,
+          });
+          
+          // Extract signals from channel/thread context to improve short_title
+          const contextSignals: string[] = [];
+          if (channelContext) {
+            for (const msg of channelContext.messages) {
+              const msgNorm = normalizeMessage(msg.text);
+              contextSignals.push(...msgNorm.signals);
+            }
+          }
+          if (threadContext) {
+            for (const msg of threadContext.messages) {
+              const msgNorm = normalizeMessage(msg.text);
+              contextSignals.push(...msgNorm.signals);
+            }
+          }
+          const uniqueSignals = [...new Set([...classification.signals, ...contextSignals])].slice(0, 10);
+          
+          // Reclassify as relevant with inferred category from context
+          classification = {
+            ...classification,
+            is_relevant: true,
+            category: (isStyleRequest || classification.category === 'irrelevant') ? 'feature_request' : classification.category,
+            confidence: Math.max(classification.confidence, isStyleRequest ? 0.6 : 0.5), // Higher confidence for style requests
+            short_title: classification.short_title || (isStyleRequest && uniqueSignals.length > 0 
+              ? `Make ${uniqueSignals[0]} ${normalizedLower.match(/\b(blue|red|green|purple|yellow|orange|pink|black|white|gray|grey)\b/)?.[0] || 'blue'}`.substring(0, 100)
+              : messageData.text.substring(0, 100)),
+            signals: uniqueSignals,
+          };
+          
+          console.log('[Pipeline] Reclassified as relevant:', {
+            category: classification.category,
+            confidence: classification.confidence.toFixed(2),
+            short_title: classification.short_title,
+            signals: classification.signals,
+          });
+        }
+      } catch (error) {
+        console.warn('[Pipeline] Error in post-classification fallback:', error);
+        // Continue with original classification
+      }
+    }
 
     // Handle irrelevant messages: attempt to attach to existing ticket as context-only
     if (!classification.is_relevant) {

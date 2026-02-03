@@ -53,7 +53,7 @@ export async function getThreadContext(
   }
 }
 
-const CHANNEL_CONTEXT_LIMIT = parseInt(process.env.CHANNEL_CONTEXT_LIMIT || '15', 10);
+const CHANNEL_CONTEXT_LIMIT = parseInt(process.env.CHANNEL_CONTEXT_LIMIT || '25', 10);
 
 /**
  * Fetch recent channel history (previous messages in the same channel) from Slack.
