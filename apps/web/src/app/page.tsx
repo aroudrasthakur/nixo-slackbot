@@ -1,4 +1,7 @@
+"use client";
+
 import Link from "next/link";
+import React, { useState } from "react";
 
 const features = [
   {
@@ -39,6 +42,51 @@ const features = [
   },
 ];
 
+/* ── Reusable interactive button wrapper ─────────────────────────── */
+
+interface InteractiveLinkProps {
+  href: string;
+  children: React.ReactNode;
+  baseStyle: React.CSSProperties;
+  hoverStyle: React.CSSProperties;
+  activeStyle?: React.CSSProperties;
+}
+
+function InteractiveLink({
+  href,
+  children,
+  baseStyle,
+  hoverStyle,
+  activeStyle,
+}: InteractiveLinkProps) {
+  const [hovered, setHovered] = useState(false);
+  const [pressed, setPressed] = useState(false);
+
+  const merged: React.CSSProperties = {
+    ...baseStyle,
+    ...(hovered ? hoverStyle : {}),
+    ...(pressed ? activeStyle ?? {} : {}),
+  };
+
+  return (
+    <Link
+      href={href}
+      style={merged}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => {
+        setHovered(false);
+        setPressed(false);
+      }}
+      onMouseDown={() => setPressed(true)}
+      onMouseUp={() => setPressed(false)}
+    >
+      {children}
+    </Link>
+  );
+}
+
+/* ── Page ─────────────────────────────────────────────────────────── */
+
 export default function HomePage() {
   return (
     <div style={{ minHeight: "100vh", backgroundColor: "#ffffff" }}>
@@ -77,49 +125,74 @@ export default function HomePage() {
         </div>
 
         <div style={{ display: "flex", alignItems: "center", gap: "16px" }}>
-          <Link
+          {/* Nav – Go to Dashboard */}
+          <InteractiveLink
             href="/dashboard"
-            style={{
+            baseStyle={{
               padding: "10px 20px",
               fontSize: "14px",
               fontWeight: 600,
               color: "#1264a3",
               textDecoration: "none",
-              borderRadius: "6px",
-              transition: "background-color 0.15s",
+              borderRadius: "8px",
+              transition: "all 0.15s ease",
             }}
+            hoverStyle={{
+              backgroundColor: "#e8f4fc",
+              transform: "translateY(-1px)",
+            }}
+            activeStyle={{ transform: "translateY(0)" }}
           >
             Go to Dashboard
-          </Link>
-          <Link
+          </InteractiveLink>
+
+          {/* Nav – Sign in */}
+          <InteractiveLink
             href="/signin"
-            style={{
+            baseStyle={{
               padding: "10px 20px",
               fontSize: "14px",
               fontWeight: 600,
               color: "#1d1c1d",
               textDecoration: "none",
-              borderRadius: "6px",
-              transition: "background-color 0.15s",
+              borderRadius: "8px",
+              transition: "all 0.15s ease",
             }}
+            hoverStyle={{
+              backgroundColor: "#f3f4f6",
+              transform: "translateY(-1px)",
+            }}
+            activeStyle={{ transform: "translateY(0)" }}
           >
             Sign in
-          </Link>
-          <Link
+          </InteractiveLink>
+
+          {/* Nav – Get Started */}
+          <InteractiveLink
             href="/signup"
-            style={{
+            baseStyle={{
               padding: "10px 20px",
               fontSize: "14px",
               fontWeight: 600,
               color: "#ffffff",
               backgroundColor: "#3F0E40",
               textDecoration: "none",
-              borderRadius: "6px",
-              transition: "background-color 0.15s",
+              borderRadius: "8px",
+              transition: "all 0.15s ease",
+              boxShadow: "0 2px 4px rgba(63,14,64,0.2)",
+            }}
+            hoverStyle={{
+              backgroundColor: "#531754",
+              transform: "translateY(-1px)",
+              boxShadow: "0 4px 12px rgba(63,14,64,0.3)",
+            }}
+            activeStyle={{
+              transform: "translateY(0)",
+              boxShadow: "0 1px 2px rgba(63,14,64,0.2)",
             }}
           >
             Get Started
-          </Link>
+          </InteractiveLink>
         </div>
       </nav>
 
@@ -165,9 +238,10 @@ export default function HomePage() {
             flexWrap: "wrap",
           }}
         >
-          <Link
+          {/* Hero – Go to Dashboard */}
+          <InteractiveLink
             href="/dashboard"
-            style={{
+            baseStyle={{
               padding: "16px 32px",
               fontSize: "16px",
               fontWeight: 600,
@@ -175,14 +249,26 @@ export default function HomePage() {
               backgroundColor: "#1264a3",
               textDecoration: "none",
               borderRadius: "8px",
-              transition: "background-color 0.15s",
+              transition: "all 0.2s ease",
+              boxShadow: "0 2px 6px rgba(18,100,163,0.25)",
+            }}
+            hoverStyle={{
+              backgroundColor: "#0d4f82",
+              transform: "translateY(-2px)",
+              boxShadow: "0 6px 16px rgba(18,100,163,0.3)",
+            }}
+            activeStyle={{
+              transform: "translateY(0)",
+              boxShadow: "0 1px 3px rgba(18,100,163,0.2)",
             }}
           >
             Go to Dashboard
-          </Link>
-          <Link
+          </InteractiveLink>
+
+          {/* Hero – Start for free */}
+          <InteractiveLink
             href="/signup"
-            style={{
+            baseStyle={{
               padding: "16px 32px",
               fontSize: "16px",
               fontWeight: 600,
@@ -190,14 +276,26 @@ export default function HomePage() {
               backgroundColor: "#007a5a",
               textDecoration: "none",
               borderRadius: "8px",
-              transition: "background-color 0.15s",
+              transition: "all 0.2s ease",
+              boxShadow: "0 2px 6px rgba(0,122,90,0.25)",
+            }}
+            hoverStyle={{
+              backgroundColor: "#005e44",
+              transform: "translateY(-2px)",
+              boxShadow: "0 6px 16px rgba(0,122,90,0.3)",
+            }}
+            activeStyle={{
+              transform: "translateY(0)",
+              boxShadow: "0 1px 3px rgba(0,122,90,0.2)",
             }}
           >
             Start for free
-          </Link>
-          <Link
+          </InteractiveLink>
+
+          {/* Hero – Sign in */}
+          <InteractiveLink
             href="/signin"
-            style={{
+            baseStyle={{
               padding: "16px 32px",
               fontSize: "16px",
               fontWeight: 600,
@@ -206,11 +304,21 @@ export default function HomePage() {
               border: "1px solid #dddddd",
               textDecoration: "none",
               borderRadius: "8px",
-              transition: "all 0.15s",
+              transition: "all 0.2s ease",
+            }}
+            hoverStyle={{
+              borderColor: "#3F0E40",
+              color: "#3F0E40",
+              transform: "translateY(-2px)",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+            }}
+            activeStyle={{
+              transform: "translateY(0)",
+              boxShadow: "none",
             }}
           >
             Sign in
-          </Link>
+          </InteractiveLink>
         </div>
       </section>
 
@@ -255,12 +363,28 @@ export default function HomePage() {
               <div
                 key={index}
                 style={{
-                  backgroundColor: "#ffffff",
-                  borderRadius: "12px",
+                  background:
+                    "linear-gradient(145deg, #ffffff 0%, #faf7fb 60%, #f3ecf5 100%)",
+                  borderRadius: "14px",
                   padding: "28px",
-                  border: "1px solid #e8e8e8",
+                  border: "1px solid #e8dfea",
+                  position: "relative",
+                  overflow: "hidden",
                 }}
               >
+                {/* Subtle purple top accent */}
+                <div
+                  style={{
+                    position: "absolute",
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    height: "3px",
+                    background:
+                      "linear-gradient(90deg, #3F0E40, #7b3f7d, #3F0E40)",
+                    opacity: 0.5,
+                  }}
+                />
                 <div
                   style={{
                     fontSize: "32px",
@@ -273,7 +397,7 @@ export default function HomePage() {
                   style={{
                     fontSize: "18px",
                     fontWeight: 600,
-                    color: "#1d1c1d",
+                    color: "#3F0E40",
                     margin: "0 0 8px 0",
                   }}
                 >
@@ -282,7 +406,7 @@ export default function HomePage() {
                 <p
                   style={{
                     fontSize: "15px",
-                    color: "#616061",
+                    color: "#6b4e6d",
                     lineHeight: 1.6,
                     margin: 0,
                   }}
@@ -322,9 +446,9 @@ export default function HomePage() {
         >
           Join teams already using Nixo Bot to manage their support
         </p>
-        <Link
+        <InteractiveLink
           href="/signup"
-          style={{
+          baseStyle={{
             display: "inline-block",
             padding: "16px 40px",
             fontSize: "16px",
@@ -333,11 +457,20 @@ export default function HomePage() {
             backgroundColor: "#ffffff",
             textDecoration: "none",
             borderRadius: "8px",
-            transition: "transform 0.15s",
+            transition: "all 0.2s ease",
+            boxShadow: "0 2px 8px rgba(0,0,0,0.15)",
+          }}
+          hoverStyle={{
+            transform: "translateY(-2px)",
+            boxShadow: "0 6px 20px rgba(0,0,0,0.25)",
+          }}
+          activeStyle={{
+            transform: "translateY(0)",
+            boxShadow: "0 1px 4px rgba(0,0,0,0.15)",
           }}
         >
           Create free account
-        </Link>
+        </InteractiveLink>
       </section>
 
       {/* Footer */}
