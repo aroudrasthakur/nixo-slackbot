@@ -29,8 +29,8 @@ export default async function TicketsPage() {
     <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
       <div
         style={{
-          borderBottom: "1px solid #e8e8e8",
-          backgroundColor: "#ffffff",
+          borderBottom: "1px solid #e0d4e1",
+          background: "linear-gradient(135deg, #f5eef6 0%, #ede4f0 50%, #f9f7fa 100%)",
           padding: "20px 24px",
         }}
       >
@@ -38,7 +38,7 @@ export default async function TicketsPage() {
           style={{
             fontSize: "22px",
             fontWeight: 700,
-            color: "#1d1c1d",
+            color: "#3F0E40",
             margin: 0,
             lineHeight: 1.3,
           }}
@@ -48,7 +48,7 @@ export default async function TicketsPage() {
         <p
           style={{
             fontSize: "14px",
-            color: "#616061",
+            color: "#6b4e6d",
             marginTop: "6px",
             marginBottom: 0,
           }}

@@ -5,6 +5,9 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 
+export const SIDEBAR_WIDTH_EXPANDED = 260;
+export const SIDEBAR_WIDTH_COLLAPSED = 64;
+
 interface NavItem {
   href: string;
   label: string;
@@ -17,10 +20,17 @@ const navItems: NavItem[] = [
   { href: "/dashboard/profile", label: "Profile", icon: "profile" },
 ];
 
-export function Sidebar() {
+interface SidebarProps {
+  collapsed: boolean;
+  onToggle: () => void;
+}
+
+export function Sidebar({ collapsed, onToggle }: SidebarProps) {
   const pathname = usePathname();
   const { user, signOut } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
+
+  const width = collapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
 
   const getInitials = () => {
     if (user?.given_name && user?.family_name) {
@@ -48,19 +58,25 @@ export function Sidebar() {
         position: "fixed",
         top: 0,
         left: 0,
-        width: "260px",
+        width: `${width}px`,
         height: "100vh",
         backgroundColor: "#3F0E40",
         display: "flex",
         flexDirection: "column",
         zIndex: 100,
+        transition: "width 0.25s ease",
+        overflow: "hidden",
       }}
     >
-      {/* Logo/Brand – click to go to landing page */}
+      {/* Logo/Brand */}
       <div
         style={{
-          padding: "16px",
+          padding: collapsed ? "16px 14px" : "16px",
           borderBottom: "1px solid rgba(255,255,255,0.1)",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          minHeight: "68px",
         }}
       >
         <Link
@@ -71,6 +87,24 @@ export function Sidebar() {
             gap: "12px",
             textDecoration: "none",
             color: "inherit",
+            overflow: "hidden",
+            padding: "6px 8px",
+            borderRadius: "8px",
+            transition: "background-color 0.15s ease, transform 0.15s ease",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.1)";
+            e.currentTarget.style.transform = "scale(1.02)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = "transparent";
+            e.currentTarget.style.transform = "scale(1)";
+          }}
+          onMouseDown={(e) => {
+            e.currentTarget.style.transform = "scale(0.97)";
+          }}
+          onMouseUp={(e) => {
+            e.currentTarget.style.transform = "scale(1.02)";
           }}
         >
           <div
@@ -84,6 +118,7 @@ export function Sidebar() {
               justifyContent: "center",
               flexShrink: 0,
               padding: "4px",
+              transition: "box-shadow 0.15s ease",
             }}
           >
             <img
@@ -102,6 +137,9 @@ export function Sidebar() {
               fontWeight: 700,
               fontSize: "17px",
               letterSpacing: "-0.3px",
+              whiteSpace: "nowrap",
+              opacity: collapsed ? 0 : 1,
+              transition: "opacity 0.2s ease",
             }}
           >
             Nixo Bot
@@ -110,7 +148,7 @@ export function Sidebar() {
       </div>
 
       {/* Navigation */}
-      <nav style={{ flex: 1, padding: "12px 8px" }}>
+      <nav style={{ flex: 1, padding: collapsed ? "12px 8px" : "12px 8px" }}>
         {navItems.map((item) => {
           const isActive =
             item.href === "/dashboard"
@@ -120,19 +158,23 @@ export function Sidebar() {
             <Link
               key={item.href}
               href={item.href}
+              title={collapsed ? item.label : undefined}
               style={{
                 display: "flex",
                 alignItems: "center",
                 gap: "10px",
-                padding: "8px 16px",
+                padding: collapsed ? "10px 0" : "8px 16px",
+                justifyContent: collapsed ? "center" : "flex-start",
                 borderRadius: "6px",
                 fontSize: "15px",
                 fontWeight: 500,
                 color: isActive ? "#ffffff" : "#d1d2d3",
                 backgroundColor: isActive ? "#1264A3" : "transparent",
                 textDecoration: "none",
-                transition: "all 0.1s ease",
+                transition: "all 0.15s ease",
                 marginBottom: "2px",
+                overflow: "hidden",
+                whiteSpace: "nowrap",
               }}
               onMouseEnter={(e) => {
                 if (!isActive) {
@@ -156,6 +198,7 @@ export function Sidebar() {
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  style={{ flexShrink: 0 }}
                 >
                   <rect x="3" y="3" width="7" height="9" rx="1" />
                   <rect x="14" y="3" width="7" height="5" rx="1" />
@@ -172,6 +215,7 @@ export function Sidebar() {
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  style={{ flexShrink: 0 }}
                 >
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
                   <polyline points="14 2 14 8 20 8" />
@@ -189,33 +233,88 @@ export function Sidebar() {
                   strokeWidth="2"
                   strokeLinecap="round"
                   strokeLinejoin="round"
+                  style={{ flexShrink: 0 }}
                 >
                   <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
                   <circle cx="12" cy="7" r="4" />
                 </svg>
               )}
-              <span>{item.label}</span>
+              {!collapsed && <span>{item.label}</span>}
             </Link>
           );
         })}
       </nav>
 
+      {/* Collapse toggle arrow */}
+      <div
+        style={{
+          padding: "8px",
+          display: "flex",
+          justifyContent: collapsed ? "center" : "flex-end",
+        }}
+      >
+        <button
+          onClick={onToggle}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          style={{
+            width: "28px",
+            height: "28px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            borderRadius: "6px",
+            border: "none",
+            backgroundColor: "transparent",
+            cursor: "pointer",
+            color: "#a0a0a0",
+            transition: "all 0.15s ease",
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.12)";
+            e.currentTarget.style.color = "#ffffff";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.backgroundColor = "transparent";
+            e.currentTarget.style.color = "#a0a0a0";
+          }}
+        >
+          <svg
+            width="16"
+            height="16"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            style={{
+              transition: "transform 0.25s ease",
+              transform: collapsed ? "rotate(180deg)" : "rotate(0deg)",
+            }}
+          >
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+      </div>
+
       {/* User section */}
       <div
         style={{
-          padding: "12px",
+          padding: collapsed ? "12px 8px" : "12px",
           borderTop: "1px solid rgba(255,255,255,0.1)",
           position: "relative",
         }}
       >
         <button
           onClick={() => setShowUserMenu(!showUserMenu)}
+          title={collapsed ? getDisplayName() : undefined}
           style={{
             width: "100%",
             display: "flex",
             alignItems: "center",
             gap: "10px",
-            padding: "8px",
+            padding: collapsed ? "6px 0" : "8px",
+            justifyContent: collapsed ? "center" : "flex-start",
             borderRadius: "6px",
             border: "none",
             backgroundColor: showUserMenu
@@ -223,6 +322,7 @@ export function Sidebar() {
               : "transparent",
             cursor: "pointer",
             transition: "background-color 0.1s",
+            overflow: "hidden",
           }}
           onMouseEnter={(e) => {
             e.currentTarget.style.backgroundColor = "rgba(255,255,255,0.1)";
@@ -250,55 +350,60 @@ export function Sidebar() {
           >
             {getInitials()}
           </div>
-          <div
-            style={{
-              flex: 1,
-              textAlign: "left",
-              overflow: "hidden",
-            }}
-          >
-            <div
-              style={{
-                color: "#ffffff",
-                fontSize: "14px",
-                fontWeight: 500,
-                whiteSpace: "nowrap",
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-              }}
-            >
-              {getDisplayName()}
-            </div>
-            {user?.email && (
+          {!collapsed && (
+            <>
               <div
                 style={{
-                  color: "#a0a0a0",
-                  fontSize: "12px",
-                  whiteSpace: "nowrap",
+                  flex: 1,
+                  textAlign: "left",
                   overflow: "hidden",
-                  textOverflow: "ellipsis",
                 }}
               >
-                {user.email}
+                <div
+                  style={{
+                    color: "#ffffff",
+                    fontSize: "14px",
+                    fontWeight: 500,
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {getDisplayName()}
+                </div>
+                {user?.email && (
+                  <div
+                    style={{
+                      color: "#a0a0a0",
+                      fontSize: "12px",
+                      whiteSpace: "nowrap",
+                      overflow: "hidden",
+                      textOverflow: "ellipsis",
+                    }}
+                  >
+                    {user.email}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="#a0a0a0"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            style={{
-              transform: showUserMenu ? "rotate(180deg)" : "rotate(0deg)",
-              transition: "transform 0.2s",
-            }}
-          >
-            <polyline points="6 9 12 15 18 9" />
-          </svg>
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#a0a0a0"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                style={{
+                  transform: showUserMenu ? "rotate(180deg)" : "rotate(0deg)",
+                  transition: "transform 0.2s",
+                  flexShrink: 0,
+                }}
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </>
+          )}
         </button>
 
         {/* User menu dropdown */}
@@ -307,8 +412,9 @@ export function Sidebar() {
             style={{
               position: "absolute",
               bottom: "100%",
-              left: "12px",
-              right: "12px",
+              left: collapsed ? "-4px" : "12px",
+              right: collapsed ? undefined : "12px",
+              width: collapsed ? "180px" : undefined,
               marginBottom: "8px",
               backgroundColor: "#ffffff",
               borderRadius: "8px",

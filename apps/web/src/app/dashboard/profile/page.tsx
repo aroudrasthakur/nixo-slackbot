@@ -17,26 +17,37 @@ export default function ProfilePage() {
   const { user } = useAuth();
 
   return (
-    <div style={{ padding: "24px", maxWidth: "600px" }}>
-      <h1
+    <div style={{ height: "100%", display: "flex", flexDirection: "column" }}>
+      <div
         style={{
-          fontSize: "22px",
-          fontWeight: 700,
-          color: "#1d1c1d",
-          margin: "0 0 8px 0",
+          borderBottom: "1px solid #e0d4e1",
+          background: "linear-gradient(135deg, #f5eef6 0%, #ede4f0 50%, #f9f7fa 100%)",
+          padding: "20px 24px",
         }}
       >
-        Profile
-      </h1>
-      <p
-        style={{
-          fontSize: "14px",
-          color: "#616061",
-          margin: "0 0 24px 0",
-        }}
-      >
-        Your account information
-      </p>
+        <h1
+          style={{
+            fontSize: "22px",
+            fontWeight: 700,
+            color: "#3F0E40",
+            margin: 0,
+            lineHeight: 1.3,
+          }}
+        >
+          Profile
+        </h1>
+        <p
+          style={{
+            fontSize: "14px",
+            color: "#6b4e6d",
+            marginTop: "6px",
+            marginBottom: 0,
+          }}
+        >
+          Your account information
+        </p>
+      </div>
+      <div style={{ padding: "24px", maxWidth: "600px" }}>
 
       <div
         style={{
@@ -167,6 +178,7 @@ export default function ProfilePage() {
             {user?.family_name ?? "—"}
           </div>
         </div>
+      </div>
       </div>
     </div>
   );

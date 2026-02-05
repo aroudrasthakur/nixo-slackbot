@@ -1,4 +1,7 @@
-import { Sidebar } from "@/components/Sidebar";
+"use client";
+
+import { useState } from "react";
+import { Sidebar, SIDEBAR_WIDTH_EXPANDED, SIDEBAR_WIDTH_COLLAPSED } from "@/components/Sidebar";
 import { ProtectedRoute } from "@/components/ProtectedRoute";
 
 export default function DashboardLayout({
@@ -6,6 +9,9 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode;
 }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const sidebarWidth = collapsed ? SIDEBAR_WIDTH_COLLAPSED : SIDEBAR_WIDTH_EXPANDED;
+
   return (
     <ProtectedRoute>
       <div
@@ -15,15 +21,16 @@ export default function DashboardLayout({
           backgroundColor: "#ffffff",
         }}
       >
-        {/* Fixed sidebar */}
-        <Sidebar />
-        {/* Main content with left margin to account for fixed sidebar */}
+        {/* Collapsible sidebar */}
+        <Sidebar collapsed={collapsed} onToggle={() => setCollapsed((c) => !c)} />
+        {/* Main content with animated margin */}
         <main
           style={{
             flex: 1,
-            marginLeft: "260px",
+            marginLeft: `${sidebarWidth}px`,
             backgroundColor: "#ffffff",
             minHeight: "100vh",
+            transition: "margin-left 0.25s ease",
           }}
         >
           {children}
